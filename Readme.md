@@ -9,3 +9,9 @@ Folders:
 - `figures`: Figures in the tutorial get output to this folder
 - `data`: Contains data used in the tutorials, unless pulled directly from a URL
 - `tutorials`: Contains a separate tutorial document for each wearable modality we want to showcase
+  - accelerometer (raw to metrics)
+  - accelerometer downstream?
+  - CGM
+  - Heart rate raw to metrics
+  - Smart phone digital phenotypes? Have Martha / Julian make this one?
+  - Any methods tutorials?
