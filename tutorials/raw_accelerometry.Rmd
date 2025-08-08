@@ -1,0 +1,40 @@
+---
+title: "raw data accelerometry pipeline"
+author: "author"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+hitheme: tomorrow
+highlighter: highlight.js
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+
+
+knitr::opts_chunk$set(echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 9,
+  fig.height = 4,
+  fig.path = "../results/"
+)
+
+theme_set(theme_bw() + theme(legend.position = "bottom"))
+```
+
+## Notes
+
+From Vadim, goals are to
+
+- show how complex this pipeline is
+- important to illustrate the processing steps that need to be done. Can be super sophisticated or can be common sense..
+  - We probably want to focus on simpler versions of this that get you 80-90% of the way there 
+- We will have a separate tutorial for minute level and higher level sumamaries for that 
+
+## Analysis
+
+Begin doing whatever is supposed to get done.
