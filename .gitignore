@@ -2,5 +2,13 @@
 .Rhistory
 .RData
 .Ruserdata
-*cache/*
-*files/*
+# Ignore knitr figure output directories
+*_files/
+**/figure-html/
+
+# Ignore knitr cache directories
+*_cache/
+**/*_cache/
+
+# Ignore specific unnamed-chunk outputs anywhere
+**/unnamed-chunk-*
