@@ -624,14 +624,19 @@ stepcount::stepcount_check()
 ```
 
 
-Then we can run the model, using the SSL model type. We have to include the sample rate as well. Since the method does it's own gravity calibration, we use the uncalibrated dataset.  
+Then we can run the model, using the SSL model type. We have to include the sample rate as well. Since the method does it's own gravity calibration, we use the uncalibrated dataset. To make knitting faster, we save the output. 
 
-```{r run_stepcount}
-#| cache: true
-ssl = stepcount::stepcount(df, sample_rate = sample_rate, model_type = "ssl")
+```{r run_stepcount_ex}
+out = here::here("tutorials", "data", "sc_out.rds")
+if(!dir.exists(dirname(out))) dir.create(dirname(out))
+
+if(!file.exists(out)){
+  ssl = stepcount::stepcount(df, sample_rate = sample_rate, model_type = "ssl")
+  readr::write_rds(ssl, out)
+}
+ssl = readr::read_rds(out)
 ```
 
-If no model is specified, the model is downloaded to a temporary directory, but users can use the `stepcount::sc_download_model` function to download the model file, store it, and pass it via the `model_path` argument.  We can also pass in a vector of file names or a list of `data.frame`s to run this procedure for multiple data sets while only loading the model once.
 
 The output of `stepcount` is a list of different pieces of information, including information about the device:
 
@@ -653,6 +658,7 @@ head(ssl$walking)
 
 The `stepcount` method estimates steps in 10-second windows, which we can aggregate into minutes:
 
+
 ```{r sc_steps_minute}
 ssl_60 = ssl$steps %>% 
   mutate(time = floor_date(time, "1 minute")) %>% 
@@ -660,17 +666,26 @@ ssl_60 = ssl$steps %>%
   summarise(ssl_steps = sum(steps), .groups = "drop")
 head(ssl_60)
 ```
+
 We can fit the random forest too: 
 
+
 ```{r rf_steps}
-#| cache: true 
-rf = stepcount::stepcount(df, sample_rate = sample_rate, model_type = "rf")
+out = here::here("tutorials", "data", "rf_out.rds")
+
+if(!file.exists(out)){
+  rf = stepcount::stepcount(df, sample_rate = sample_rate, model_type = "rf")
+  readr::write_rds(rf, out)
+}
+rf = readr::read_rds(out)
+
 rf_60 = 
   rf$steps %>% 
   mutate(time = floor_date(time, "1 minute")) %>% 
   group_by(time) %>% 
   summarise(rf_steps = sum(steps), .groups = "drop")
 ```
+
 
 We can plot the results; we see a large difference between number steps identified by each method! 
 
@@ -723,7 +738,8 @@ p1 = df %>%
   geom_rect(data = xdf, 
             aes(xmin = time, xmax = end, ymin = -Inf, ymax = Inf, fill = rf_steps), 
              alpha = 0.5, inherit.aes = FALSE) + 
-  viridis::scale_fill_viridis(limits = c(9, 20), name = "Steps per 10 second window")
+  viridis::scale_fill_viridis(limits = c(9, 20), name = "Steps per 10 second window",
+                              breaks = seq(10, 20, 2))
 
 p2 = df %>% 
   mutate(vm = sqrt(X^2 + Y^2 + Z^2)) %>% 
@@ -737,7 +753,8 @@ p2 = df %>%
   geom_rect(data = xdf, 
             aes(xmin = time, xmax = end, ymin = -Inf, ymax = Inf, fill = ssl_steps), 
              alpha = 0.5, inherit.aes = FALSE) + 
-  viridis::scale_fill_viridis(limits = c(9, 20), name = "Steps per 10 second window")
+  viridis::scale_fill_viridis(limits = c(9, 20), name = "Steps per 10 second window",
+                              breaks = seq(10, 20, 2))
 
 
 p1 / p2 + plot_layout(guides = "collect", axes = "collect") & theme(legend.position = "bottom")
