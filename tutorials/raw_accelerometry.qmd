@@ -26,6 +26,7 @@ library(dplyr)
 library(ggplot2)
 library(tidyr)
 library(lubridate)
+library(patchwork)
 ```
 
 This tutorial will focus on generating minute-level Activity Counts^[[https://www.nature.com/articles/s41598-022-16003-x](https://www.nature.com/articles/s41598-022-16003-x)] and steps from a an ActiGraph GT3X file. While this pipeline is not comprehensive, it includes the basic steps that are necessary to process raw accelerometry data into minute-level summaries. 
@@ -207,7 +208,7 @@ head(df_flagged)
 
 
 ```{r}
-long = df_flagged %>% 
+long_flag = df_flagged %>% 
   pivot_longer(cols = X:Z, names_to = "axis", values_to = "accel")
 
 idle_df = df_flagged %>% 
@@ -215,7 +216,7 @@ idle_df = df_flagged %>%
                    floor_date(time[1]) + as.period(5, "minutes"))) %>% 
   filter(idle == TRUE) 
 
-long %>% 
+long_flag %>% 
   filter(between(time, floor_date(time[1]), #keep only first 5 minutes
                    floor_date(time[1]) + as.period(5, "minutes"))) %>% 
     ggplot(aes(x = time, y = accel, colour = axis)) + 
@@ -447,16 +448,26 @@ Typically, we calculate counts for 60-second (1 minute) epochs. We can pass in t
 ```{r run_ac60}
 #| cache: true
 
-df_counts = df_calibrated %>% 
+df_calibrated = df_calibrated %>% 
   as.data.frame()
-ac60 = df_counts %>% 
-  agcounts::calculate_counts(epoch = 60L, tz = lubridate::tz(df_counts$time))
+ac60 = df_calibrated %>% 
+  agcounts::calculate_counts(epoch = 60L, tz = lubridate::tz(df_calibrated$time))
 head(ac60)
 
 ac60 = 
   ac60 %>% 
   select(time, AC = Vector.Magnitude, everything())
 
+# save for later analysis 
+out_dir = here::here("data", "accel_outputs")
+if(!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+out_file = here::here(out_dir, "minute_level_ac.rds")
+if(!file.exists(out_file)) {
+  readr::write_rds(ac60,
+                   out_file,
+                   compress = "xz")
+}
 ```
 
 :::{.callout-note}
@@ -493,7 +504,6 @@ ac60 %>%
   scale_x_datetime(date_labels = "%H:%M", date_breaks = "2 hours") +
   labs(y = "Activity Counts (AC)", x = "Time") +
   theme(panel.grid = element_blank()) + 
-  scale_y_continuous(limits = c(0, 10000)) + 
   annotate(geom = "text",
            x = min(df$time) + lubridate::hours(16),
            y = 1430,
@@ -513,6 +523,341 @@ ac60 %>%
 
 ## Calculating other outputs 
 
+### MIMS 
+
+Monitor Independent Movement Summary (MIMS)^[[https://pubmed.ncbi.nlm.nih.gov/34308270/](https://pubmed.ncbi.nlm.nih.gov/34308270/)] are an open-source summary of physical activity. They were used in the NHANES accelerometry study from 2011-2014^[[https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2011/DataFiles/PAXMIN_G.htm](https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2011/DataFiles/PAXMIN_G.htm)]. We can calculate MIMS using the `MIMSunit` package; this requires `acceleration_max` variables from the header. 
+
+
+```{r calculate_mims}
+#| cache: true
+dynamic_range = c(-acceleration_max, acceleration_max)
+df_mims = df_calibrated %>% 
+  rename(HEADER_TIME_STAMP = time) %>% 
+  MIMSunit::mims_unit(dynamic_range = dynamic_range, epoch = "1 min")
+
+## save for later analysis 
+out_file = here::here(out_dir, "minute_level_mims.rds")
+if(!file.exists(out_file)) {
+  readr::write_rds(df_mims %>% rename(time = HEADER_TIME_STAMP, mims = MIMS_UNIT),
+                   out_file,
+                   compress = "xz")
+}
+```
+
+Note, as this resamples data to 100Hz, this may have a significantly larger memory footprint for processing than the raw data.  We can see the output from the MIMS processing:
+
+```{r mims_show}
+head(df_mims)
+```
+We can plot the MIMS, using thresholds mapped from the AC thresholds^[[https://pmc.ncbi.nlm.nih.gov/articles/PMC9356340/](https://pmc.ncbi.nlm.nih.gov/articles/PMC9356340/)]. 
+
+```{r}
+df_mims %>% 
+  ggplot(aes(x = HEADER_TIME_STAMP, y = MIMS_UNIT)) + 
+  geom_line() +
+  annotate(geom = "rect",
+           xmin = min(df$time),
+           xmax = max(df$time),
+           ymin = 0,
+           ymax = 15.047,
+           fill = "#3498DBFF",
+           alpha = 0.5) + 
+  annotate(geom = "rect",
+           xmin = min(df$time),
+           xmax = max(df$time),
+           ymin = 15.048,
+           ymax = 19.614,
+           fill = "#F39C12FF",
+           alpha = 0.5) + 
+   annotate(geom = "rect",
+           xmin = min(df$time),
+           xmax = max(df$time),
+           ymin = 19.615,
+           ymax = Inf,
+           fill = "#E74C3CFF",
+           alpha = 0.5) + 
+  labs(y = "MIMS", x = "Time") +
+  theme(panel.grid = element_blank()) + 
+  annotate(geom = "text",
+           x = min(df$time) + lubridate::hours(16),
+           y = 8,
+           label = "Sedentary") + 
+  annotate(geom = "text",
+           x = min(df$time) + lubridate::hours(16),
+           y = 17,
+           label = "Light") + 
+  annotate(geom = "text",
+           x = min(df$time) + lubridate::hours(16),
+           y = 23,
+           label = "Moderate-vigorous") +
+  scale_x_datetime(date_labels = "%H:%M", date_breaks = "2 hours") +
+  labs(y = "MIMS", x = "Time") +
+  theme(panel.grid = element_blank()) 
+
+```
+
+
 ### Steps 
 
-### MIMS 
+Steps can be estimated from raw accelerometry data using several different open source algorithms. Here we'll focus on two algorithms: the machine learning based [`stepcount` algorithm](https://github.com/OxWearables/stepcount), which is implemented in Python. The Python module provides two machine learning algorithms (self-supervised learner [SSL] and random forest [RF]) that estimate steps from raw accelerometry. 
+
+The [`stepcount`](https://github.com/jhuwit/stepcount) R package wraps this Python code. The package also has functions for creating a Conda environment for these functions, as many different Python modules have different requirements - the `walking` package has similar functionality.
+
+You need to first create the conda environment: 
+
+```{r}
+#| eval: false
+envname = "stepcount"
+reticulate::conda_create(envname = envname, packages = c("python=3.9", "openjdk", "pip"))
+Sys.unsetenv("RETICULATE_PYTHON")
+reticulate::use_condaenv(envname)
+reticulate::py_install("stepcount", envname = envname, method = "conda", pip = TRUE)
+```
+
+Then we can check we have everything in order: 
+
+```{r}
+stepcount::unset_reticulate_python()
+stepcount::use_stepcount_condaenv()
+library(reticulate)
+stepcount::stepcount_check() 
+```
+
+
+Then we can run the model, using the SSL model type. We have to include the sample rate as well. Since the method does it's own gravity calibration, we use the uncalibrated dataset.  
+
+```{r run_stepcount}
+#| cache: true
+ssl = stepcount::stepcount(df, sample_rate = sample_rate, model_type = "ssl")
+```
+
+If no model is specified, the model is downloaded to a temporary directory, but users can use the `stepcount::sc_download_model` function to download the model file, store it, and pass it via the `model_path` argument.  We can also pass in a vector of file names or a list of `data.frame`s to run this procedure for multiple data sets while only loading the model once.
+
+The output of `stepcount` is a list of different pieces of information, including information about the device:
+
+```{r stepcount_output}
+names(ssl)
+```
+
+We are most interested in the `data.frame` of estimated steps with associated timestamps:
+
+```{r stepcount_steps}
+head(ssl$steps)
+```
+
+and similarly a `data.frame` of flagged time for walking:
+
+```{r stepcount_walking}
+head(ssl$walking)
+```
+
+The `stepcount` method estimates steps in 10-second windows, which we can aggregate into minutes:
+
+```{r sc_steps_minute}
+ssl_60 = ssl$steps %>% 
+  mutate(time = floor_date(time, "1 minute")) %>% 
+  group_by(time) %>% 
+  summarise(ssl_steps = sum(steps), .groups = "drop")
+head(ssl_60)
+```
+We can fit the random forest too: 
+
+```{r rf_steps}
+#| cache: true 
+rf = stepcount::stepcount(df, sample_rate = sample_rate, model_type = "rf")
+rf_60 = 
+  rf$steps %>% 
+  mutate(time = floor_date(time, "1 minute")) %>% 
+  group_by(time) %>% 
+  summarise(rf_steps = sum(steps), .groups = "drop")
+```
+
+We can plot the results; we see a large difference between number steps identified by each method! 
+
+```{r plot_steps}
+steps_joined = 
+  rf_60 %>% 
+  full_join(ssl_60, by = "time")
+
+steps_joined %>% 
+  pivot_longer(cols = contains("steps"),
+               names_to = "method", 
+               values_to = "steps") %>% 
+  mutate(method = factor(method, levels = c("ssl_steps", "rf_steps"), labels = c("SSL", "RF"))) %>%
+  ggplot(aes(x = time, y = steps, color = method)) + 
+  geom_step() +
+  scale_x_datetime(date_labels = "%H:%M", date_breaks = "2 hours") +
+  labs(y = "Steps per Minute", x = "Time") +
+  theme(panel.grid = element_blank(),
+        legend.position = "none") +
+  scale_color_manual(values = c("#9B59B6FF", "#D35400FF"),
+                     labels = c("SSL", "RF"),
+                     name = "Method") + 
+  facet_grid(method~.)
+```
+
+Finally, we can zoom in on a walking period: 
+
+```{r walking_period}
+joined_seconds =
+  ssl$steps %>% rename(ssl_steps = steps) %>% 
+  full_join(rf$steps %>% rename(rf_steps = steps), by = "time") %>% 
+  filter(rf_steps > 0 & ssl_steps > 0)
+
+
+xdf = 
+  joined_seconds %>% 
+  mutate(end = time + as.period(10, "seconds")) %>% 
+  filter(time >= as.POSIXct("2012-06-27 16:53:40", tz = "GMT") & 
+         end <= as.POSIXct("2012-06-27 16:54:40", tz = "GMT"))
+
+p1 = df %>% 
+  mutate(vm = sqrt(X^2 + Y^2 + Z^2)) %>% 
+  filter(time >= as.POSIXct("2012-06-27 16:53:50", tz = "GMT") & 
+         time <= as.POSIXct("2012-06-27 16:54:40", tz = "GMT")) %>%
+  ggplot(aes(x = time, y = vm)) + 
+  geom_line() + 
+  scale_x_datetime(date_breaks = "5 secs", date_labels = "%H:%M:%S") +
+  theme(panel.grid = element_blank()) +
+  labs(x = "Time of day", y = "Acceleration (g)", title = "RF Steps") +
+  geom_rect(data = xdf, 
+            aes(xmin = time, xmax = end, ymin = -Inf, ymax = Inf, fill = rf_steps), 
+             alpha = 0.5, inherit.aes = FALSE) + 
+  viridis::scale_fill_viridis(limits = c(9, 20), name = "Steps per 10 second window")
+
+p2 = df %>% 
+  mutate(vm = sqrt(X^2 + Y^2 + Z^2)) %>% 
+  filter(time >= as.POSIXct("2012-06-27 16:53:50", tz = "GMT") & 
+         time <= as.POSIXct("2012-06-27 16:54:40", tz = "GMT")) %>%
+  ggplot(aes(x = time, y = vm)) + 
+  geom_line() + 
+  scale_x_datetime(date_breaks = "5 secs", date_labels = "%H:%M:%S") +
+  theme(panel.grid = element_blank()) +
+  labs(x = "Time of day", y = "Acceleration (g)", title = "SSL Steps") +
+  geom_rect(data = xdf, 
+            aes(xmin = time, xmax = end, ymin = -Inf, ymax = Inf, fill = ssl_steps), 
+             alpha = 0.5, inherit.aes = FALSE) + 
+  viridis::scale_fill_viridis(limits = c(9, 20), name = "Steps per 10 second window")
+
+
+p1 / p2 + plot_layout(guides = "collect", axes = "collect") & theme(legend.position = "bottom")
+```
+
+```{r save_walking}
+## save results for downstream analysis
+out_file = here::here(out_dir, "minute_level_steps.rds")
+if(!file.exists(out_file)) {
+  readr::write_rds(steps_joined,
+                   out_file,
+                   compress = "xz")
+}
+
+```
+
+
+
+
+## Reproducing figure for manuscript 
+
+We use the stepcount RF output to get a data frame of walking segments. 
+
+```{r}
+rf_segments = 
+  rf$steps %>% 
+  mutate(is_walking = steps > 0,
+         segment = cumsum(!is_walking & lag(is_walking, default = FALSE))) %>% 
+  filter(is_walking) %>%
+  group_by(segment) %>%
+  summarize(start = min(time),
+            end = max(time)) %>%
+  ungroup() %>%
+  select(start, end)
+
+```
+
+
+
+```{r}
+long %>%
+  ggplot(aes(x = time, y = accel, color = axis)) +
+  geom_line(linewidth = .05) +
+  scale_x_datetime(date_breaks = "2 hours", date_labels = "%H") +
+  theme(panel.grid = element_blank(),
+        legend.position = "inside",
+        legend.position.inside = c(0.6, 0.1)) +
+  labs(x = "Time of day (hour)", y = "Acceleration (g)") +
+  paletteer::scale_color_paletteer_d("ggthemr::flat", name = "Axis") +
+  guides(color = guide_legend(
+    nrow = 1,
+    override.aes = list(alpha = 1, linewidth = 1)
+  )) 
+
+df %>%
+  mutate(vm = sqrt(X^2 + Y^2 + Z^2)) %>% 
+  ggplot(aes(x = time, y = vm)) +
+  scale_x_datetime(date_breaks = "2 hours", date_labels = "%H:%M") +
+  theme(panel.grid = element_blank()) +
+  labs(x = "Time of day", y = "Acceleration (g)") +
+  scale_y_continuous(limits = c(0, 7)) +
+  geom_rect(
+    data = rf_segments,
+    aes(
+      xmin = start,
+      xmax = end,
+      ymin = -Inf,
+      ymax = Inf
+    ),
+    fill = "#FFAD72FF",
+    alpha = .9,
+    inherit.aes = FALSE
+  ) +
+  geom_line(linewidth = .05) 
+```
+
+```{r}
+
+p1 = 
+  df %>%
+  mutate(vm = sqrt(X^2 + Y^2 + Z^2)) %>% 
+  filter(time >= as.POSIXct("2012-06-27 17:01:20", tz = "GMT") & 
+           time <= as.POSIXct("2012-06-27 17:02:40", tz = "GMT")) %>%
+  ggplot(aes(x = time, y = vm)) +
+  annotate(geom = "rect",
+      xmin =  as.POSIXct("2012-06-27 17:01:21", tz = "GMT"),
+      xmax =  as.POSIXct("2012-06-27 17:02:39", tz = "GMT"),
+      ymin = -Inf,
+      ymax = Inf,
+    fill = "#FFAD72FF",
+    alpha = 0.5
+  ) +
+  geom_line(linewidth = .2) +
+  scale_x_datetime(date_breaks = "10 secs", date_labels = "%H:%M:%S") +
+  theme(panel.grid = element_blank()) +
+  labs(x = "Time of day", y = "Acceleration (g)") 
+
+p2 = df %>%
+  mutate(vm = sqrt(X^2 + Y^2 + Z^2)) %>% 
+  filter(time >= as.POSIXct("2012-06-27 17:01:25", tz = "GMT") & 
+           time <= as.POSIXct("2012-06-27 17:01:35", tz = "GMT")) %>%
+  ggplot(aes(x = time, y = vm)) +
+  annotate(geom = "rect", 
+      xmin = as.POSIXct("2012-06-27 17:01:25", tz = "GMT"),
+      xmax = as.POSIXct("2012-06-27 17:01:35", tz = "GMT"),
+      ymin = -Inf,
+      ymax = Inf,
+    fill = "#FFAD72FF",
+    alpha = 0.5
+  ) +
+  geom_line(linewidth = .5) +
+  scale_x_datetime(date_breaks = "5 secs", date_labels = "%H:%M:%S") +
+  theme(panel.grid = element_blank(),
+        axis.title = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) +
+  labs(x = "", y = "") 
+p1 + inset_element(p2, left = 0.5, bottom = 0.5, right = 1, top = 1)
+
+```
+
+
+
