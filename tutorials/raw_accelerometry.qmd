@@ -1,0 +1,880 @@
+---
+title: "Raw Accelerometry Tutorial"
+date: "`r Sys.Date()`"
+format: 
+  html:
+    toc: true
+    toc-location: left
+    embed-resources: true
+    code-background: true
+    code-tools: true
+    code-fold: false
+    code-block-border-left: true
+    theme: flatly
+    css: styles.css
+execute:
+  echo: true
+  cache: true
+  message: false
+  warning: false
+editor: source
+---
+
+```{r load packages} 
+#| include: false 
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(lubridate)
+library(patchwork)
+```
+
+This tutorial will focus on generating minute-level Activity Counts^[[https://www.nature.com/articles/s41598-022-16003-x](https://www.nature.com/articles/s41598-022-16003-x)] and steps from a an ActiGraph GT3X file. While this pipeline is not comprehensive, it includes the basic steps that are necessary to process raw accelerometry data into minute-level summaries. 
+
+::: {.callout-note}
+The `.gt3x` [file format](https://github.com/actigraph/GT3X-File-Format) is used by ActiGraph accelerometers and contains raw accelerometer data along with metadata including timestamps and device information. Accelerometry data may be provided in other formats, such as `.csv`, but will typically include timestamps, values for acceleration in the X, Y, and Z dimensions, and metadata like participant ID. 
+:::
+
+
+First, we download a GT3X file from the [ActiGraph website](https://actigraphcorp.my.site.com/support/s/article/GT3X-ActiSleep-Sample-Data). The file contains approximately one day of data. 
+
+## Download file 
+
+```{r download data}
+gt3x_file_raw = here::here("data", "accel_data_raw", "GT3X+ (01 day).gt3x")
+gt3x_file = here::here("data", "accel_data_raw", "sample_data.gt3x")
+
+if(!file.exists(gt3x_file)){
+  url = "http://dl.theactigraph.com/demo/files/GT3XPlus-RawData(1-20).zip"
+
+  out_file = here::here("data", "accel_data_raw.zip")
+  if(!file.exists(out_file)){
+    curl::curl_download(url, out_file, mode = "wb")
+  }
+  
+  zip_file = here::here("data", "accel_data_raw.zip")
+  out_dir  = here::here("data", "accel_data_raw")
+  
+  if (!dir.exists(out_dir)) {
+    dir.create(out_dir, recursive = TRUE)
+  }
+  
+  zip_list = unzip(zip_file, list = TRUE)
+  
+  unzip(zip_file, files = zip_list[1]$Name, exdir = out_dir)
+  file.rename(gt3x_file_raw, gt3x_file)
+}
+
+```
+
+## Read in the data 
+
+We read in the data using the `read.gt3x` package. We read in as a dataframe instead of matrix (`asDataFrame = TRUE`) and impute any missing values with zeroes (`imputeZeroes = TRUE`).  The `read.gt3x::read.gt3x` function will read in the data and return a `data.frame` with columns for time, X, Y, Z, and other metadata.  The time column is in POSIXct format.
+
+
+
+```{r read in gt3x}
+#| cache: true
+df = read.gt3x::read.gt3x(path = gt3x_file,
+                          asDataFrame = TRUE,
+                          imputeZeroes = TRUE)
+
+```
+
+## Get to know the data
+
+The columns in the data are `time`, `X`, `Y`, and `Z`. Regardless of whether the data came from a GT3X file or other format, the next steps assume the data is in a `data.frame` format with columns for timestamp and the three acceleration axes. 
+
+```{r}
+head(df)
+```
+
+The data frame also has attributes that provide additional information about the data. The most important attributes are `sample_rate` and  `acceleration_min`/`acceleration_max`. Many functions for processing the raw data require the `sample_rate`; alternatively, the sample rate can be estimated from the timestamps if they are uniform. The `acceleration_min` and `acceleration_max` attributes provide the minimum and maximum acceleration values that the device can measure, which is important for calculating minute-level metrics like Activity Counts or Monitor Independent Movement Summary [(MIMS)](https://pmc.ncbi.nlm.nih.gov/articles/PMC8301210/). 
+
+
+
+```{r}
+attributes(df) %>% names
+attr(df, "sample_rate")
+```
+
+
+::: {.callout-tip}
+When working with sub-second level data, make sure to set option `digits.secs = 3`. This allows us to make sure that milliseconds haven't been truncated. Truncation can occur during conversion from timestamp types or when writing and then reading from other data formats (e.g. CSV). Failure to account for milliseconds properly can cause problems when joining/merging based on timestamps.
+:::
+
+
+```{r}
+options(digits.secs = 3)
+head(df$time)
+```
+
+
+### A note on time zones 
+
+When using the `read.gt3x` package, the time zone of the output data is always `GMT`. Which time zone the data were collected may be contained in the header; in this case however, it is not. 
+
+```{r}
+attr_list = attributes(df)
+attr_list$header$TimeZone
+```
+
+::: {.callout-important}
+All timestamps are in local time (of the device) even though they are represented as `POSIXct` with `GMT` timezone [in the data].
+:::
+
+
+You can set the data to the correct timezone with `lubridate::tz`. The `with_tz` and `force_tz` functions can change the timestamp the data in different ways (changing attribute vs. changing data).  
+
+Here we illustrate the difference between changing the attribute and changing the data. Let's take a subset of the times and show the time zone (GMT). 
+
+```{r}
+times = head(df$time)
+times
+tz(times)
+```
+
+The `force_tz`, and  `tz(x) <-` functions assign a specified timezone to the object.
+
+```{r}
+times_pst = times; tz(times_pst) <- "America/Los_Angeles"; times_pst
+force_tz(times, "America/Los_Angeles")
+```
+
+Note the data still indicates hour minute `10:54`, but in a different timezone.
+
+The `with_tz` function projects the data into a timezone, but the actual moment of time does not change:
+
+```{r}
+with_tz(times, "America/Los_Angeles")
+```
+
+Now the data displays hour `03:54` as this shifts the data from GMT.  We can see that `force_tz` doesn't change the way the data is stored, just the way it is displayed, but `with_tz` changes the way the data is both stored and displayed.
+
+```{r}
+as.numeric(times_pst)
+as.numeric(force_tz(times, "America/Los_Angeles"))
+as.numeric(with_tz(times, "America/Los_Angeles"))
+```
+
+:::{.callout-warning}
+Use caution with time zones, especially in the presence of data from different devices and when merging data with timestamps, such as merging with GPS or heart rate data. Shifting time may project some data into a different day/date, which is highly relevant since many summary measures are done at a day/date level.
+:::
+
+### Plotting the data 
+
+Before we do anything else, let's plot the data. We have `r nrow(df)` observations, so we'll want to start with plotting a subset only. We pivot the data longer for easier plotting and plot the first five minutes of observations. 
+
+```{r}
+#| cache: true 
+long = df %>% 
+  pivot_longer(cols = X:Z, names_to = "axis", values_to = "accel")
+
+long %>% 
+  filter(between(time, floor_date(time[1]), #keep only first 5 minutes
+                   floor_date(time[1]) + as.period(5, "minutes"))) %>% 
+    ggplot(aes(x = time, y = accel, colour = axis)) + 
+    geom_line() + # add acceleration, can also do `geom_step`
+    theme(legend.position = "inside", 
+          legend.position.inside = c(0.6, 0.78),
+          panel.grid = element_blank()) +
+  guides(color = guide_legend(nrow = 1)) +
+  paletteer::scale_color_paletteer_d("ggthemr::flat", name = "Axis") +
+  scale_x_datetime(date_labels = "%H:%M", date_breaks = "1 min")+
+  labs(y = "Acceleration (g)", x = "Time") 
+  
+
+```
+We see that at the beginning of the data, all acceleration values are zero. We'll discuss this in the context of idle sleep mode. 
+
+
+## Handling idle sleep mode 
+
+Idle sleep mode is an option for ActiGraph devices set when recording. When a device hasn't moved for a period of time, it does not record any measurements until the device moves again. This is done to preserve battery life. 
+
+[ActiGraph documentation](https://actigraphcorp.my.site.com/support/s/article/Idle-Sleep-Mode-Explained) explains idle sleep mode as follows: 
+
+> For example, a device set to sample at 30Hz would store the last known accelerometer reading 30 times every second; the device would then wake up and check for movement.  If no movement were detected, this pattern would continue.  Otherwise the unit would exit sleep mode (i.e., "wake up") and continue sampling in normal fashion.
+
+Thus, if idle sleep mode activates on a device, there will be a gap in time in the measurements. While this is an accurate representation of the data, it causes issues for methods that rely on continuous measurements. The `imputeZeroes` argument in `read.gt3x` fills in missing measurements with `0` for all axes. This zeroes are not always from idle sleep mode: for example, they could also be from charging events. The `flag_idle_sleep` (default `FALSE`) argument in `read.gt3x` outputs an indicator column of `idle` or not and is useful for identifying segments of data that are in idle sleep mode. We see that the first few seconds of our data are in idle sleep mode: 
+
+```{r read_flagged_data}
+df_flagged = read.gt3x::read.gt3x(path = gt3x_file, 
+                                  asDataFrame = TRUE, 
+                                  imputeZeroes = TRUE,
+                                  flag_idle_sleep = TRUE)
+head(df_flagged)
+```
+
+
+```{r}
+long_flag = df_flagged %>% 
+  pivot_longer(cols = X:Z, names_to = "axis", values_to = "accel")
+
+idle_df = df_flagged %>% 
+  filter(between(time, floor_date(time[1]), #keep only first 5 minutes
+                   floor_date(time[1]) + as.period(5, "minutes"))) %>% 
+  filter(idle == TRUE) 
+
+long_flag %>% 
+  filter(between(time, floor_date(time[1]), #keep only first 5 minutes
+                   floor_date(time[1]) + as.period(5, "minutes"))) %>% 
+    ggplot(aes(x = time, y = accel, colour = axis)) + 
+    geom_line() + # add acceleration, can also do `geom_step`
+    annotate(geom = "rect",
+             xmin = min(idle_df$time),
+             xmax = max(idle_df$time),
+             ymin = -3,
+             ymax = 3,
+             fill = "pink", 
+             alpha = .8) +
+    theme(legend.position = "inside", 
+          legend.position.inside = c(0.6, 0.78),
+          panel.grid = element_blank()) +
+  guides(color = guide_legend(nrow = 1)) +
+  paletteer::scale_color_paletteer_d("ggthemr::flat", name = "Axis") +
+  scale_x_datetime(date_labels = "%H:%M", date_breaks = "1 min")+
+  labs(y = "Acceleration (g)", x = "Time") 
+```
+
+There's also at least one more instance of idle sleep mode: 
+
+```{r}
+idle_df_notstart = df_flagged %>% 
+  filter(!between(time, floor_date(time[1]), #keep only first 5 minutes
+                   floor_date(time[1]) + as.period(5, "minutes"))) %>% 
+  filter(idle == TRUE) 
+
+segments_idle = 
+  idle_df_notstart %>% 
+  mutate(lag = as.numeric(difftime(time, lag(time), units = "secs")),
+         lag = lag < .05,
+         group = data.table::rleid(lag))
+
+
+##11:20 to 11:50
+long %>% 
+  filter(between(time, as.POSIXct("2012-06-27 11:20:00", tz = "GMT"),
+                 as.POSIXct("2012-06-27 11:50:00", tz = "GMT"))) %>% 
+    ggplot(aes(x = time, y = accel, colour = axis)) + 
+    geom_line() + # add acceleration, can also do `geom_step`
+    annotate(geom = "rect",
+             xmin = min(segments_idle$time[segments_idle$group == 2]),
+             xmax = max(segments_idle$time[segments_idle$group == 2]),
+             ymin = -3,
+             ymax = 3,
+             fill = "pink", 
+             alpha = .7) +
+    theme(legend.position = "inside", 
+          legend.position.inside = c(0.6, 0.9),
+          panel.grid = element_blank()) +
+  guides(color = guide_legend(nrow = 1)) +
+  paletteer::scale_color_paletteer_d("ggthemr::flat", name = "Axis") +
+  scale_x_datetime(date_labels = "%H:%M", date_breaks = "5 min")+
+  labs(y = "Acceleration (g)", x = "Time") 
+```
+
+There are a few options for handling data in idle sleep mode:
+
++ Leave gaps in the data 
++ Fill in `NA` values for these segments
++ Fill in `0` values for these segments,
++ Last observation carried forward (LOCF)
+
+::: {.table}
+| Method   | Issues |
+|---------|---------|
+| Leave gaps in data  | Most software assumes continuous time, missing time may cause errors 
+| Fill in `NA` values  | Some software assumes no missing data  |
+| Fill in `0` values   | Not accurate because gravity is being exerted on the device, can cause sharp changes in the signal which can induce higher variance than is correct (going from value to `0`) |
+| Last observation carried forward (LOCF)   | Not "real" values, harder to identify non-wear after the fact if not flagged appropriately |
+:::
+
+:::{.callout-note}
+The LOCF approach is such that if the last measurement before non-measurement on an axis was `0.952` for example, the value of `0.952` will be repeated for each sample until the device moves. Each axis is handled separately (no information for X is used for Y). This procedure is done for all axes.  
+:::
+
+
+Our recommendation is to use the LOCF approach. It is consistent with the ActiGraph documentation, induces a variance of 0 during the idle sleep interval, has no jump discontinuity from previous measurements, provides continuous signal, and can be flagged.  Summary measures of activity (e.g. Activity Counts, Activity Index) should provide an appropriate summary value of $0$ to this zero variance data.
+
+There are packages that implement LOCF on this type of data, but we can also do it using some straightforward `tidyverse` functions.  We find records where all axes have an acceleration of $0$, replace those acceleration values for those records with `NA` and fill in the data (using LOCF) using `tidyr::fill`.
+
+```{r save_xdf}
+#| echo: false
+xdf = df
+```
+
+```{r fill_data}
+sample_rate = attr(df, "sample_rate")
+acceleration_max = as.numeric(attr(df, "acceleration_max"))
+df = dplyr::as_tibble(df)
+df = df %>% 
+  mutate(all_zero = X == 0 & Y == 0 & Z == 0) %>%  # flag where all zeroes
+  mutate( # replace all 0 with NA so it can be filled  
+    X = ifelse(all_zero, NA_real_, X),
+    Y = ifelse(all_zero, NA_real_, Y),
+    Z = ifelse(all_zero, NA_real_, Z)
+  )
+any(df$all_zero)
+df = df %>% 
+  select(-all_zero) %>% # remove this column
+  tidyr::fill(X, Y, Z, .direction = "down") # fill down using LOCF (time sorted)
+head(df)
+```
+
+If the first records are in idle sleep mode, they will have no "before value" to fill in and will continue to be `NA` given this code.  To handle this last case we can replace these values using `tidyr::fill` with the direction of "up" to make a flat starting signal or with $0$ for simplicity (done here):
+
+```{r na_replace}
+df = df %>% tidyr::replace_na(list(X = 0, Y = 0, Z = 0))
+```
+
+This ensures that every record has a numeric value.  Users can also drop those first records.
+
+Now we can see that the signal has been filled in for those segments that were previously all $0$.
+
+
+```{r}
+long = df %>% 
+  pivot_longer(cols = X:Z, names_to = "axis", values_to = "accel")
+
+long %>% 
+  filter(between(time, as.POSIXct("2012-06-27 11:20:00", tz = "GMT"),
+                 as.POSIXct("2012-06-27 11:50:00", tz = "GMT"))) %>% 
+    ggplot(aes(x = time, y = accel, colour = axis)) + 
+    geom_line() + # add acceleration, can also do `geom_step`
+    annotate(geom = "rect",
+             xmin = min(segments_idle$time[segments_idle$group == 2]),
+             xmax = max(segments_idle$time[segments_idle$group == 2]),
+             ymin = -3,
+             ymax = 3,
+             fill = "pink", 
+             alpha = .7) +
+    theme(legend.position = "inside", 
+          legend.position.inside = c(0.6, 0.9),
+          panel.grid = element_blank()) +
+  guides(color = guide_legend(nrow = 1)) +
+  paletteer::scale_color_paletteer_d("ggthemr::flat", name = "Axis") +
+  scale_x_datetime(date_labels = "%H:%M", date_breaks = "5 min")+
+  labs(y = "Acceleration (g)", x = "Time") 
+```
+
+## Gravity Calibration
+
+Gravity correction/calibration corrects issues in the data that may arise from miscalibration of a device. Accelerometry is measured in $g$, and we assume that gravity values for each person are the same if another device was used or the same device was used at a different location. Thus gravity correction can help harmonize data that is different due to non-biological or systemic effects.
+
+The most common gravity correction method estimates shift and scale parameters to transform the data and will therefore only affect downstream metrics that are not invariant to scaling and shifting. The correction should be small compared to the magnitude of the signal. 
+
+:::{.callout-note}
+Not all pipelines employ gravity correction, including many pipelines for ActiGraph data.
+:::
+
+We will use the method employed in GGIR^[[https://journals.physiology.org/doi/full/10.1152/japplphysiol.00421.2014](https://journals.physiology.org/doi/full/10.1152/japplphysiol.00421.2014)]. 
+
+
+::: {.callout-note collapse="true"}
+### More about gravity calibration
+The calibration is done by estimating how much of the data is projected onto the unit sphere (radius of length 1 for all 3 axes).
+
+The procedure below looks for when the standard deviation of the signal was <13 m$g$ (milli-$g$) in all three axes within a time window.  The 13 m$g$ cutoff was selected to be just above the empirically derived baseline (noise) standard deviation of 10 m$g$ to retain only non-movement periods. A window of length 10 seconds is used.
+:::
+
+
+The `GGIR::g.calibrate` function takes in a data filename and calculates the calibration parameters.  We recommend to input the output of `g.inspectfile` that provides metadata and a specification of the file being calibrated.  Since we have an older GT3X file that can't be directly read in by GGIR, we first use the `SummarizedActigraphy` package to write to csv, then use GGIR for calibration. We use `imputeZeroes=FALSE` because we don't want the calibration to use any data from idle sleep mode. 
+
+```{r calibrate}
+#| cache: true
+library(GGIR)
+df_nozero = read.gt3x::read.gt3x(path = gt3x_file, 
+                      asDataFrame = TRUE,
+                      imputeZeroes = FALSE)
+
+outfile = SummarizedActigraphy::write_acc_csv(df_nozero, 
+                                              tempfile(fileext = ".csv"))
+info = GGIR::g.inspectfile(outfile)
+csv_calibration_params = GGIR::g.calibrate(
+  datafile = outfile,
+  inspectfileobject = info)
+```
+
+
+The parameters denotes how many hours of data was used:
+
+```{r calibrate_n_hours}
+csv_calibration_params$nhoursused
+```
+
+What the estimated calibration error was for all non-movement windows before and after calibration to the unit sphere:
+
+```{r calibrate_cal_error}
+csv_calibration_params$cal.error.start
+csv_calibration_params$cal.error.end
+```
+
+In this case, we see that: 
+
+```{r}
+csv_calibration_params$QCmessage
+```
+
+Therefore the scale and shift parameters are $1$ and $0$ in all three dimensions: 
+
+```{r calibrate_cal_estimates}
+csv_calibration_params[c("scale", "offset")]
+```
+
+We'll still illustrate how to calibrate the data by using the  `scale` function and  performing the subtraction/division:
+
+```{r df_calibrated}
+df_calibrated = df
+df_calibrated[, c("X", "Y", "Z")] = scale(
+  df[, c("X", "Y", "Z")], 
+  center = -csv_calibration_params$offset, 
+  scale = 1/csv_calibration_params$scale)
+```
+
+## Calculating Activity Counts 
+
+
+Activity Counts (AC) are a measure of physical activity. Previously they were a proprietary output of the ActiLife software, but the ActiGraph team published a [paper](https://www.nature.com/articles/s41598-022-16003-x]) in 2022 that describes how they are calculated and released the `agcounts` Python module to calculate them^[[https://github.com/actigraph/agcounts](https://github.com/actigraph/agcounts)].  The `agcounts`, `actilifecounts`, and [`agcounter`](https://github.com/muschellij2/agcounter) packages have functions that can convert the raw data into minute-level counts. The `actilifecounts` implements the method in native R code, `agcounts`/`agcounter` wraps the Python code into an R interface.
+
+Calculating AC from these packages gives a per-axis AC measure.  Axis-level AC can be aggregated from higher resolutions to lower: if you calculate AC at 15 second intervals, then the 60 second/minute level AC is the sum of the 4 values measured at 15 seconds.  Once AC is aggregated at the desired epoch, the AC units from the axes are combined into a vector magnitude for a single summary:
+
+$$
+AC = \sqrt{(AC_{x}^2 + AC_{y}^2 + AC_{z}^2)}
+$$
+
+Typically, we calculate counts for 60-second (1 minute) epochs. We can pass in the timezone of the data to ensure the desired time stamps. We use the calibrated data and have to first convert to data frame, then rename columns for consistency. 
+
+```{r run_ac60}
+#| cache: true
+
+df_calibrated = df_calibrated %>% 
+  as.data.frame()
+ac60 = df_calibrated %>% 
+  agcounts::calculate_counts(epoch = 60L, tz = lubridate::tz(df_calibrated$time))
+head(ac60)
+
+ac60 = 
+  ac60 %>% 
+  select(time, AC = Vector.Magnitude, everything())
+
+# save for later analysis 
+out_dir = here::here("data", "accel_outputs")
+if(!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+out_file = here::here(out_dir, "minute_level_ac.rds")
+if(!file.exists(out_file)) {
+  readr::write_rds(ac60,
+                   out_file,
+                   compress = "xz")
+}
+```
+
+:::{.callout-note}
+The AC algorithm resamples the data to 30Hz. The original algorithm provided in the `agcounts` Python module only correctly handled sample rates that were measured at round intervals (e.g. 30, 40, ..., 90, 100).
+:::
+
+Let's plot the AC with some thresholds for physical activity levels. While many different thresholds can be used, the Montoye^[ [https://pubmed.ncbi.nlm.nih.gov/32677510/](https://pubmed.ncbi.nlm.nih.gov/32677510/)] thresholds are a common choice.
+
+```{r}
+ac60 %>% 
+  ggplot(aes(x = time, y = AC)) + 
+  geom_line() +
+  annotate(geom = "rect",
+           xmin = min(df$time),
+           xmax = max(df$time),
+           ymin = 0,
+           ymax = 2860,
+           fill = "#3498DBFF",
+           alpha = 0.5) + 
+  annotate(geom = "rect",
+           xmin = min(df$time),
+           xmax = max(df$time),
+           ymin = 2861,
+           ymax = 3940,
+           fill = "#F39C12FF",
+           alpha = 0.5) + 
+   annotate(geom = "rect",
+           xmin = min(df$time),
+           xmax = max(df$time),
+           ymin = 3941,
+           ymax = Inf,
+           fill = "#E74C3CFF",
+           alpha = 0.5) + 
+  scale_x_datetime(date_labels = "%H:%M", date_breaks = "2 hours") +
+  labs(y = "Activity Counts (AC)", x = "Time") +
+  theme(panel.grid = element_blank()) + 
+  annotate(geom = "text",
+           x = min(df$time) + lubridate::hours(16),
+           y = 1430,
+           label = "Sedentary") + 
+  annotate(geom = "text",
+           x = min(df$time) + lubridate::hours(16),
+           y = 3300,
+           label = "Light") + 
+  annotate(geom = "text",
+           x = min(df$time) + lubridate::hours(16),
+           y = 7000,
+           label = "Moderate-vigorous")
+
+
+  
+```
+
+## Calculating other outputs 
+
+### MIMS 
+
+Monitor Independent Movement Summary (MIMS)^[[https://pubmed.ncbi.nlm.nih.gov/34308270/](https://pubmed.ncbi.nlm.nih.gov/34308270/)] are an open-source summary of physical activity. They were used in the NHANES accelerometry study from 2011-2014^[[https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2011/DataFiles/PAXMIN_G.htm](https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2011/DataFiles/PAXMIN_G.htm)]. We can calculate MIMS using the `MIMSunit` package; this requires `acceleration_max` variables from the header. 
+
+
+```{r calculate_mims}
+#| cache: true
+dynamic_range = c(-acceleration_max, acceleration_max)
+df_mims = df_calibrated %>% 
+  rename(HEADER_TIME_STAMP = time) %>% 
+  MIMSunit::mims_unit(dynamic_range = dynamic_range, epoch = "1 min")
+
+## save for later analysis 
+out_file = here::here(out_dir, "minute_level_mims.rds")
+if(!file.exists(out_file)) {
+  readr::write_rds(df_mims %>% rename(time = HEADER_TIME_STAMP, mims = MIMS_UNIT),
+                   out_file,
+                   compress = "xz")
+}
+```
+
+Note, as this resamples data to 100Hz, this may have a significantly larger memory footprint for processing than the raw data.  We can see the output from the MIMS processing:
+
+```{r mims_show}
+head(df_mims)
+```
+We can plot the MIMS, using thresholds mapped from the AC thresholds^[[https://pmc.ncbi.nlm.nih.gov/articles/PMC9356340/](https://pmc.ncbi.nlm.nih.gov/articles/PMC9356340/)]. 
+
+```{r}
+df_mims %>% 
+  ggplot(aes(x = HEADER_TIME_STAMP, y = MIMS_UNIT)) + 
+  geom_line() +
+  annotate(geom = "rect",
+           xmin = min(df$time),
+           xmax = max(df$time),
+           ymin = 0,
+           ymax = 15.047,
+           fill = "#3498DBFF",
+           alpha = 0.5) + 
+  annotate(geom = "rect",
+           xmin = min(df$time),
+           xmax = max(df$time),
+           ymin = 15.048,
+           ymax = 19.614,
+           fill = "#F39C12FF",
+           alpha = 0.5) + 
+   annotate(geom = "rect",
+           xmin = min(df$time),
+           xmax = max(df$time),
+           ymin = 19.615,
+           ymax = Inf,
+           fill = "#E74C3CFF",
+           alpha = 0.5) + 
+  labs(y = "MIMS", x = "Time") +
+  theme(panel.grid = element_blank()) + 
+  annotate(geom = "text",
+           x = min(df$time) + lubridate::hours(16),
+           y = 8,
+           label = "Sedentary") + 
+  annotate(geom = "text",
+           x = min(df$time) + lubridate::hours(16),
+           y = 17,
+           label = "Light") + 
+  annotate(geom = "text",
+           x = min(df$time) + lubridate::hours(16),
+           y = 23,
+           label = "Moderate-vigorous") +
+  scale_x_datetime(date_labels = "%H:%M", date_breaks = "2 hours") +
+  labs(y = "MIMS", x = "Time") +
+  theme(panel.grid = element_blank()) 
+
+```
+
+
+### Steps 
+
+Steps can be estimated from raw accelerometry data using several different open source algorithms. Here we'll focus on two algorithms: the machine learning based [`stepcount` algorithm](https://github.com/OxWearables/stepcount), which is implemented in Python. The Python module provides two machine learning algorithms (self-supervised learner [SSL] and random forest [RF]) that estimate steps from raw accelerometry. 
+
+The [`stepcount`](https://github.com/jhuwit/stepcount) R package wraps this Python code. The package also has functions for creating a Conda environment for these functions, as many different Python modules have different requirements - the `walking` package has similar functionality.
+
+You need to first create the conda environment: 
+
+```{r}
+#| eval: false
+envname = "stepcount"
+reticulate::conda_create(envname = envname, packages = c("python=3.9", "openjdk", "pip"))
+Sys.unsetenv("RETICULATE_PYTHON")
+reticulate::use_condaenv(envname)
+reticulate::py_install("stepcount", envname = envname, method = "conda", pip = TRUE)
+```
+
+Then we can check we have everything in order: 
+
+```{r}
+stepcount::unset_reticulate_python()
+stepcount::use_stepcount_condaenv()
+library(reticulate)
+stepcount::stepcount_check() 
+```
+
+
+Then we can run the model, using the SSL model type. We have to include the sample rate as well. Since the method does it's own gravity calibration, we use the uncalibrated dataset. To make knitting faster, we save the output. 
+
+```{r run_stepcount_ex}
+out = here::here("tutorials", "data", "sc_out.rds")
+if(!dir.exists(dirname(out))) dir.create(dirname(out))
+
+if(!file.exists(out)){
+  ssl = stepcount::stepcount(df, sample_rate = sample_rate, model_type = "ssl")
+  readr::write_rds(ssl, out)
+}
+ssl = readr::read_rds(out)
+```
+
+
+The output of `stepcount` is a list of different pieces of information, including information about the device:
+
+```{r stepcount_output}
+names(ssl)
+```
+
+We are most interested in the `data.frame` of estimated steps with associated timestamps:
+
+```{r stepcount_steps}
+head(ssl$steps)
+```
+
+and similarly a `data.frame` of flagged time for walking:
+
+```{r stepcount_walking}
+head(ssl$walking)
+```
+
+The `stepcount` method estimates steps in 10-second windows, which we can aggregate into minutes:
+
+
+```{r sc_steps_minute}
+ssl_60 = ssl$steps %>% 
+  mutate(time = floor_date(time, "1 minute")) %>% 
+  group_by(time) %>% 
+  summarise(ssl_steps = sum(steps), .groups = "drop")
+head(ssl_60)
+```
+
+We can fit the random forest too: 
+
+
+```{r rf_steps}
+out = here::here("tutorials", "data", "rf_out.rds")
+
+if(!file.exists(out)){
+  rf = stepcount::stepcount(df, sample_rate = sample_rate, model_type = "rf")
+  readr::write_rds(rf, out)
+}
+rf = readr::read_rds(out)
+
+rf_60 = 
+  rf$steps %>% 
+  mutate(time = floor_date(time, "1 minute")) %>% 
+  group_by(time) %>% 
+  summarise(rf_steps = sum(steps), .groups = "drop")
+```
+
+
+We can plot the results; we see a large difference between number steps identified by each method! 
+
+```{r plot_steps}
+steps_joined = 
+  rf_60 %>% 
+  full_join(ssl_60, by = "time")
+
+steps_joined %>% 
+  pivot_longer(cols = contains("steps"),
+               names_to = "method", 
+               values_to = "steps") %>% 
+  mutate(method = factor(method, levels = c("ssl_steps", "rf_steps"), labels = c("SSL", "RF"))) %>%
+  ggplot(aes(x = time, y = steps, color = method)) + 
+  geom_step() +
+  scale_x_datetime(date_labels = "%H:%M", date_breaks = "2 hours") +
+  labs(y = "Steps per Minute", x = "Time") +
+  theme(panel.grid = element_blank(),
+        legend.position = "none") +
+  scale_color_manual(values = c("#9B59B6FF", "#D35400FF"),
+                     labels = c("SSL", "RF"),
+                     name = "Method") + 
+  facet_grid(method~.)
+```
+
+Finally, we can zoom in on a walking period: 
+
+```{r walking_period}
+joined_seconds =
+  ssl$steps %>% rename(ssl_steps = steps) %>% 
+  full_join(rf$steps %>% rename(rf_steps = steps), by = "time") %>% 
+  filter(rf_steps > 0 & ssl_steps > 0)
+
+
+xdf = 
+  joined_seconds %>% 
+  mutate(end = time + as.period(10, "seconds")) %>% 
+  filter(time >= as.POSIXct("2012-06-27 16:53:40", tz = "GMT") & 
+         end <= as.POSIXct("2012-06-27 16:54:40", tz = "GMT"))
+
+p1 = df %>% 
+  mutate(vm = sqrt(X^2 + Y^2 + Z^2)) %>% 
+  filter(time >= as.POSIXct("2012-06-27 16:53:50", tz = "GMT") & 
+         time <= as.POSIXct("2012-06-27 16:54:40", tz = "GMT")) %>%
+  ggplot(aes(x = time, y = vm)) + 
+  geom_line() + 
+  scale_x_datetime(date_breaks = "5 secs", date_labels = "%H:%M:%S") +
+  theme(panel.grid = element_blank()) +
+  labs(x = "Time of day", y = "Acceleration (g)", title = "RF Steps") +
+  geom_rect(data = xdf, 
+            aes(xmin = time, xmax = end, ymin = -Inf, ymax = Inf, fill = rf_steps), 
+             alpha = 0.5, inherit.aes = FALSE) + 
+  viridis::scale_fill_viridis(limits = c(9, 20), name = "Steps per 10 second window",
+                              breaks = seq(10, 20, 2))
+
+p2 = df %>% 
+  mutate(vm = sqrt(X^2 + Y^2 + Z^2)) %>% 
+  filter(time >= as.POSIXct("2012-06-27 16:53:50", tz = "GMT") & 
+         time <= as.POSIXct("2012-06-27 16:54:40", tz = "GMT")) %>%
+  ggplot(aes(x = time, y = vm)) + 
+  geom_line() + 
+  scale_x_datetime(date_breaks = "5 secs", date_labels = "%H:%M:%S") +
+  theme(panel.grid = element_blank()) +
+  labs(x = "Time of day", y = "Acceleration (g)", title = "SSL Steps") +
+  geom_rect(data = xdf, 
+            aes(xmin = time, xmax = end, ymin = -Inf, ymax = Inf, fill = ssl_steps), 
+             alpha = 0.5, inherit.aes = FALSE) + 
+  viridis::scale_fill_viridis(limits = c(9, 20), name = "Steps per 10 second window",
+                              breaks = seq(10, 20, 2))
+
+
+p1 / p2 + plot_layout(guides = "collect", axes = "collect") & theme(legend.position = "bottom")
+```
+
+```{r save_walking}
+## save results for downstream analysis
+out_file = here::here(out_dir, "minute_level_steps.rds")
+if(!file.exists(out_file)) {
+  readr::write_rds(steps_joined,
+                   out_file,
+                   compress = "xz")
+}
+
+```
+
+
+
+
+## Reproducing figure for manuscript 
+
+We use the stepcount RF output to get a data frame of walking segments. 
+
+```{r}
+rf_segments = 
+  rf$steps %>% 
+  mutate(is_walking = steps > 0,
+         segment = cumsum(!is_walking & lag(is_walking, default = FALSE))) %>% 
+  filter(is_walking) %>%
+  group_by(segment) %>%
+  summarize(start = min(time),
+            end = max(time)) %>%
+  ungroup() %>%
+  select(start, end)
+
+```
+
+
+
+```{r}
+long %>%
+  ggplot(aes(x = time, y = accel, color = axis)) +
+  geom_line(linewidth = .05) +
+  scale_x_datetime(date_breaks = "2 hours", date_labels = "%H") +
+  theme(panel.grid = element_blank(),
+        legend.position = "inside",
+        legend.position.inside = c(0.6, 0.1)) +
+  labs(x = "Time of day (hour)", y = "Acceleration (g)") +
+  paletteer::scale_color_paletteer_d("ggthemr::flat", name = "Axis") +
+  guides(color = guide_legend(
+    nrow = 1,
+    override.aes = list(alpha = 1, linewidth = 1)
+  )) 
+
+df %>%
+  mutate(vm = sqrt(X^2 + Y^2 + Z^2)) %>% 
+  ggplot(aes(x = time, y = vm)) +
+  scale_x_datetime(date_breaks = "2 hours", date_labels = "%H:%M") +
+  theme(panel.grid = element_blank()) +
+  labs(x = "Time of day", y = "Acceleration (g)") +
+  scale_y_continuous(limits = c(0, 7)) +
+  geom_rect(
+    data = rf_segments,
+    aes(
+      xmin = start,
+      xmax = end,
+      ymin = -Inf,
+      ymax = Inf
+    ),
+    fill = "#FFAD72FF",
+    alpha = .9,
+    inherit.aes = FALSE
+  ) +
+  geom_line(linewidth = .05) 
+```
+
+```{r}
+
+p1 = 
+  df %>%
+  mutate(vm = sqrt(X^2 + Y^2 + Z^2)) %>% 
+  filter(time >= as.POSIXct("2012-06-27 17:01:20", tz = "GMT") & 
+           time <= as.POSIXct("2012-06-27 17:02:40", tz = "GMT")) %>%
+  ggplot(aes(x = time, y = vm)) +
+  annotate(geom = "rect",
+      xmin =  as.POSIXct("2012-06-27 17:01:21", tz = "GMT"),
+      xmax =  as.POSIXct("2012-06-27 17:02:39", tz = "GMT"),
+      ymin = -Inf,
+      ymax = Inf,
+    fill = "#FFAD72FF",
+    alpha = 0.5
+  ) +
+  geom_line(linewidth = .2) +
+  scale_x_datetime(date_breaks = "10 secs", date_labels = "%H:%M:%S") +
+  theme(panel.grid = element_blank()) +
+  labs(x = "Time of day", y = "Acceleration (g)") 
+
+p2 = df %>%
+  mutate(vm = sqrt(X^2 + Y^2 + Z^2)) %>% 
+  filter(time >= as.POSIXct("2012-06-27 17:01:25", tz = "GMT") & 
+           time <= as.POSIXct("2012-06-27 17:01:35", tz = "GMT")) %>%
+  ggplot(aes(x = time, y = vm)) +
+  annotate(geom = "rect", 
+      xmin = as.POSIXct("2012-06-27 17:01:25", tz = "GMT"),
+      xmax = as.POSIXct("2012-06-27 17:01:35", tz = "GMT"),
+      ymin = -Inf,
+      ymax = Inf,
+    fill = "#FFAD72FF",
+    alpha = 0.5
+  ) +
+  geom_line(linewidth = .5) +
+  scale_x_datetime(date_breaks = "5 secs", date_labels = "%H:%M:%S") +
+  theme(panel.grid = element_blank(),
+        axis.title = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) +
+  labs(x = "", y = "") 
+p1 + inset_element(p2, left = 0.5, bottom = 0.5, right = 1, top = 1)
+
+```
+
+
+
