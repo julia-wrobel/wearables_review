@@ -27,9 +27,10 @@ library(ggplot2)
 library(tidyr)
 library(lubridate)
 library(patchwork)
+library(SummarizedActigraphy)
 ```
 
-This tutorial will focus on generating minute-level Activity Counts^[[https://www.nature.com/articles/s41598-022-16003-x](https://www.nature.com/articles/s41598-022-16003-x)] and steps from a an ActiGraph GT3X file. While this pipeline is not comprehensive, it includes the basic steps that are necessary to process raw accelerometry data into minute-level summaries. 
+This tutorial will focus on generating minute-level Activity Counts^[[https://www.nature.com/articles/s41598-022-16003-x](https://www.nature.com/articles/s41598-022-16003-x)] and steps from an ActiGraph GT3X file. While this pipeline is not comprehensive, it includes the basic steps that are necessary to process raw accelerometry data into minute-level summaries. 
 
 ::: {.callout-note}
 The `.gt3x` [file format](https://github.com/actigraph/GT3X-File-Format) is used by ActiGraph accelerometers and contains raw accelerometer data along with metadata including timestamps and device information. Accelerometry data may be provided in other formats, such as `.csv`, but will typically include timestamps, values for acceleration in the X, Y, and Z dimensions, and metadata like participant ID. 
@@ -185,6 +186,7 @@ long %>%
   
 
 ```
+
 We see that at the beginning of the data, all acceleration values are zero. We'll discuss this in the context of idle sleep mode. 
 
 
@@ -607,6 +609,8 @@ You need to first create the conda environment:
 
 ```{r}
 #| eval: false
+
+library(stepcount)
 envname = "stepcount"
 reticulate::conda_create(envname = envname, packages = c("python=3.9", "openjdk", "pip"))
 Sys.unsetenv("RETICULATE_PYTHON")

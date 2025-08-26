@@ -3,7 +3,7 @@
 .RData
 .Ruserdata
 sandbox/
-
+.DS_Store
 
 
 # Ignore knitr figure output directories
