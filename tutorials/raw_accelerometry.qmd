@@ -121,7 +121,10 @@ attr_list$header$TimeZone
 ```
 
 ::: {.callout-important}
-All timestamps are in local time (of the device) even though they are represented as `POSIXct` with `GMT` timezone [in the data].
+All timestamps are in local time (of the device) even though they are represented as `POSIXct` with `GMT` timezone [in the data]; see documentation [here](https://github.com/THLfi/read.gt3x/blob/a41037a5ab1390b5393ee09efacac08a44432a77/R/readGT3X.R#L9). Let's go through an explicit example. 
+
++ A user starts recording data with a GT3X device at 8AM in New York City in June (Eastern Daylight Time Zone, UTC-6). 
++ In the data, the timestamp will be recorded as `08:00 GMT`
 :::
 
 
@@ -137,25 +140,27 @@ tz(times)
 
 The `force_tz`, and  `tz(x) <-` functions assign a specified timezone to the object.
 
+
 ```{r}
-times_pst = times; tz(times_pst) <- "America/Los_Angeles"; times_pst
-force_tz(times, "America/Los_Angeles")
+times_edt = times # make a copy of the times 
+tz(times_edt) <- "America/New_York"; times_edt
+force_tz(times, "America/New_York")
 ```
 
-Note the data still indicates hour minute `10:54`, but in a different timezone.
+We see that the result is the time itself hasn't changed but the time zone attachd is `EDT` instead of `GMT`. Tge data still indicates hour minute `10:54`, but in a different timezone.
 
 The `with_tz` function projects the data into a timezone, but the actual moment of time does not change:
 
 ```{r}
-with_tz(times, "America/Los_Angeles")
+with_tz(times, "America/New_York")
 ```
 
-Now the data displays hour `03:54` as this shifts the data from GMT.  We can see that `force_tz` doesn't change the way the data is stored, just the way it is displayed, but `with_tz` changes the way the data is both stored and displayed.
+Now the data displays hour `06:54` as this shifts the data from GMT.  We can see that `force_tz` doesn't change the way the data is stored, just the way it is displayed, but `with_tz` changes the way the data is both stored and displayed.
 
 ```{r}
-as.numeric(times_pst)
-as.numeric(force_tz(times, "America/Los_Angeles"))
-as.numeric(with_tz(times, "America/Los_Angeles"))
+as.numeric(times_edt)
+as.numeric(force_tz(times, "America/New_York"))
+as.numeric(with_tz(times, "America/New_York"))
 ```
 
 :::{.callout-warning}
