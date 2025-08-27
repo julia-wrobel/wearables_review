@@ -383,6 +383,15 @@ The procedure below looks for when the standard deviation of the signal was <13 
 
 The `GGIR::g.calibrate` function takes in a data filename and calculates the calibration parameters.  We recommend to input the output of `g.inspectfile` that provides metadata and a specification of the file being calibrated.  Since we have an older GT3X file that can't be directly read in by GGIR, we first use the `SummarizedActigraphy` package to write to csv, then use GGIR for calibration. We use `imputeZeroes=FALSE` because we don't want the calibration to use any data from idle sleep mode. 
 
+We can download the `SummarizedActigraphy` package from [Github](https://github.com/muschellij2/SummarizedActigraphy) first: 
+
+```{r}
+# install.packages("remotes")
+remotes::install_github("muschellij2/SummarizedActigraphy")
+```
+
+Then apply calibration: 
+
 ```{r calibrate}
 #| cache: true
 library(GGIR)
@@ -478,6 +487,12 @@ The AC algorithm resamples the data to 30Hz. The original algorithm provided in 
 
 Let's plot the AC with some thresholds for physical activity levels. While many different thresholds can be used, the Montoye^[ [https://pubmed.ncbi.nlm.nih.gov/32677510/](https://pubmed.ncbi.nlm.nih.gov/32677510/)] thresholds are a common choice.
 
+:::{.callout-note}
+### More about thresholds 
+The Montoye thresholds were developed by observing $n=47$ participants in both laboratory and free-living settings. Activity intensity was determined through direct observation and then mapped to the AC measured by wrist-worn accelerometers to develop cut points for each activity intensity. The cut points had an accuracy of $70$\% in free-living. The Montoye thresholds are specific to Activity Counts, but [another paper](https://pmc.ncbi.nlm.nih.gov/articles/PMC9356340/) has mapped the AC thresholds to other activity summaries, including Monitor Independent Movement Summaries (MIMS; see below) and Euclidian Norm Minus One (ENMO)^[[https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0164045](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0164045)]. 
+:::
+
+
 ```{r}
 ac60 %>% 
   ggplot(aes(x = time, y = AC)) + 
@@ -551,6 +566,7 @@ Note, as this resamples data to 100Hz, this may have a significantly larger memo
 ```{r mims_show}
 head(df_mims)
 ```
+
 We can plot the MIMS, using thresholds mapped from the AC thresholds^[[https://pmc.ncbi.nlm.nih.gov/articles/PMC9356340/](https://pmc.ncbi.nlm.nih.gov/articles/PMC9356340/)]. 
 
 ```{r}
@@ -776,109 +792,156 @@ if(!file.exists(out_file)) {
 ```
 
 
+### Nonwear and Sleep
 
+The `actigraph.sleepr` package implements three sleep scoring/detection algorithms: Sadeh^[[https://pubmed.ncbi.nlm.nih.gov/7939118/](https://pubmed.ncbi.nlm.nih.gov/7939118/)], Cole-Kripke^[[https://pubmed.ncbi.nlm.nih.gov/1455130/](https://pubmed.ncbi.nlm.nih.gov/1455130/)] and Tudor-Locke^[[https://pubmed.ncbi.nlm.nih.gov/24383507/](https://pubmed.ncbi.nlm.nih.gov/24383507/)] as well as two non-wear detection algorithms: Troiano^[[https://pubmed.ncbi.nlm.nih.gov/18091006/](https://pubmed.ncbi.nlm.nih.gov/18091006/)] and Choi^[[https://pubmed.ncbi.nlm.nih.gov/20581716/](https://pubmed.ncbi.nlm.nih.gov/20581716/)].
 
-## Reproducing figure for manuscript 
-
-We use the stepcount RF output to get a data frame of walking segments. 
+We can download the package from Github: 
 
 ```{r}
-rf_segments = 
-  rf$steps %>% 
-  mutate(is_walking = steps > 0,
-         segment = cumsum(!is_walking & lag(is_walking, default = FALSE))) %>% 
-  filter(is_walking) %>%
-  group_by(segment) %>%
-  summarize(start = min(time),
-            end = max(time)) %>%
-  ungroup() %>%
-  select(start, end)
+# install.packages("remotes")
+remotes::install_github("dipetkov/actigraph.sleepr")
+```
 
+#### Nonwear 
+
+We will demonstrate using the Choi algorithm to find nonwear. We will run this on the minute-level AC data, *not* the raw accelerometry data. 
+
+We need to rename the `time` column to `timestamp` and make all column names lowercase. 
+
+
+```{r choi_data}
+data = ac60 %>%
+  rename(timestamp = time) %>% 
+  janitor::clean_names()
 ```
 
 
+```{r choi}
+choi_nonwear = actigraph.sleepr::apply_choi(data, use_magnitude = TRUE)
+head(choi_nonwear)
+```
+The default for `use_magnitude` is `FALSE`, which means that only the `axis1` is used to measure activity. We set `use_magnitude = TRUE` so that the magnitude of the vector (axis1, axis2, axis3) is used instead. 
+
+The output is a `data.frame` with the start and stop times of non-wear, along with the length of the nonwear interval. 
+
+We see that the output is a `data.frame` of start and stop times of non-wear.  We can expand this to a sequence of times and merge with the minute level counts, creating a column with an indicator for wear. 
 
 ```{r}
-long %>%
-  ggplot(aes(x = time, y = accel, color = axis)) +
-  geom_line(linewidth = .05) +
-  scale_x_datetime(date_breaks = "2 hours", date_labels = "%H") +
-  theme(panel.grid = element_blank(),
-        legend.position = "inside",
-        legend.position.inside = c(0.6, 0.1)) +
-  labs(x = "Time of day (hour)", y = "Acceleration (g)") +
-  paletteer::scale_color_paletteer_d("ggthemr::flat", name = "Axis") +
-  guides(color = guide_legend(
-    nrow = 1,
-    override.aes = list(alpha = 1, linewidth = 1)
-  )) 
-
-df %>%
-  mutate(vm = sqrt(X^2 + Y^2 + Z^2)) %>% 
-  ggplot(aes(x = time, y = vm)) +
-  scale_x_datetime(date_breaks = "2 hours", date_labels = "%H:%M") +
-  theme(panel.grid = element_blank()) +
-  labs(x = "Time of day", y = "Acceleration (g)") +
-  scale_y_continuous(limits = c(0, 7)) +
-  geom_rect(
-    data = rf_segments,
-    aes(
-      xmin = start,
-      xmax = end,
-      ymin = -Inf,
-      ymax = Inf
-    ),
-    fill = "#FFAD72FF",
-    alpha = .9,
-    inherit.aes = FALSE
-  ) +
-  geom_line(linewidth = .05) 
+if (nrow(choi_nonwear) == 0) {
+  data$choi_wear = TRUE
+} else {
+  choi_df = purrr::map2_df(
+    choi_nonwear$period_start, choi_nonwear$period_end,
+    function(from, to) {
+      data.frame(timestamp = seq(from, to, by = 60L), # need this name to align
+                 choi_wear = FALSE)
+    })
+  data = left_join(data, choi_df) %>%
+    tidyr::replace_na(list(choi_wear = TRUE)) # default is wear
+}
+head(data)
+data %>% 
+  count(choi_wear)
 ```
+We can visualize the nonwear period detected by highlighting in yellow: 
 
 ```{r}
+data %>% 
+  ggplot(aes(x = timestamp, y = ac)) + 
+  geom_line() +
+  geom_rect(data = choi_nonwear,
+            aes(xmin = period_start,
+                xmax = period_end,
+                ymin = -Inf,
+                ymax = Inf),
+            alpha = 0.5,
+           fill = "#F1C40FFF",
+           inherit.aes = FALSE) + 
+  scale_x_datetime(date_labels = "%H:%M", date_breaks = "2 hours") +
+  labs(y = "Activity Counts (AC)", x = "Time") +
+  theme(panel.grid = element_blank())
+```
+The Choi algorithm is also implemented in the `wearMarking` function in the [`PhysicalActivity`](https://cran.r-project.org/web/packages/PhysicalActivity/index.html) package. There are many other methods for nonwear detection, see [Syed 2020](https://www.nature.com/articles/s41598-020-62821-2) for a comparison of some methods. 
 
-p1 = 
-  df %>%
-  mutate(vm = sqrt(X^2 + Y^2 + Z^2)) %>% 
-  filter(time >= as.POSIXct("2012-06-27 17:01:20", tz = "GMT") & 
-           time <= as.POSIXct("2012-06-27 17:02:40", tz = "GMT")) %>%
-  ggplot(aes(x = time, y = vm)) +
-  annotate(geom = "rect",
-      xmin =  as.POSIXct("2012-06-27 17:01:21", tz = "GMT"),
-      xmax =  as.POSIXct("2012-06-27 17:02:39", tz = "GMT"),
-      ymin = -Inf,
-      ymax = Inf,
-    fill = "#FFAD72FF",
-    alpha = 0.5
-  ) +
-  geom_line(linewidth = .2) +
-  scale_x_datetime(date_breaks = "10 secs", date_labels = "%H:%M:%S") +
-  theme(panel.grid = element_blank()) +
-  labs(x = "Time of day", y = "Acceleration (g)") 
 
-p2 = df %>%
-  mutate(vm = sqrt(X^2 + Y^2 + Z^2)) %>% 
-  filter(time >= as.POSIXct("2012-06-27 17:01:25", tz = "GMT") & 
-           time <= as.POSIXct("2012-06-27 17:01:35", tz = "GMT")) %>%
-  ggplot(aes(x = time, y = vm)) +
-  annotate(geom = "rect", 
-      xmin = as.POSIXct("2012-06-27 17:01:25", tz = "GMT"),
-      xmax = as.POSIXct("2012-06-27 17:01:35", tz = "GMT"),
-      ymin = -Inf,
-      ymax = Inf,
-    fill = "#FFAD72FF",
-    alpha = 0.5
-  ) +
-  geom_line(linewidth = .5) +
-  scale_x_datetime(date_breaks = "5 secs", date_labels = "%H:%M:%S") +
-  theme(panel.grid = element_blank(),
-        axis.title = element_blank(),
-        axis.text.y = element_blank(),
-        axis.ticks.y = element_blank()) +
-  labs(x = "", y = "") 
-p1 + inset_element(p2, left = 0.5, bottom = 0.5, right = 1, top = 1)
+#### Sleep 
+
+Like nonwear, there are many options for sleep detection. Here we will just show sleep detection using the Cole-Kripke algorithm, implemented in `actigraph.sleepr::apply_cole_kripke`.
+
+
+```{r redata_ac60}
+data = ac60 %>%
+  rename(timestamp = time) %>% 
+  janitor::clean_names()
+```
+
+```{r sleep_ck}
+ck = actigraph.sleepr::apply_sadeh(data)
+head(ck)
+```
+
+We see there's now a `sleep` column in the data that is either `S` (sleep) or `W` (wake). 
+
+```{r}
+ck %>% 
+  count(sleep)
+```
+We can plot the sleep/wake predictions. First we need to make a data frame with the sleep period start/ends. 
+
+```{r ck_plot}
+sleep_periods = 
+  ck %>% 
+  mutate(sleep_period = data.table::rleid(sleep)) %>% 
+  group_by(sleep_period) %>% 
+  summarize(period_start = min(timestamp),
+            period_end = max(timestamp),
+            sleep = first(sleep),
+            .groups = "drop")
+  
+data %>% 
+  ggplot(aes(x = timestamp, y = ac)) + 
+  geom_line() +
+  geom_rect(data = sleep_periods %>% filter(sleep == "S"),
+            aes(xmin = period_start,
+                xmax = period_end,
+                ymin = -Inf,
+                ymax = Inf),
+            alpha = 0.5,
+           fill = "#F39C12FF",
+           inherit.aes = FALSE) + 
+  scale_x_datetime(date_labels = "%H:%M", date_breaks = "2 hours") +
+  labs(y = "Activity Counts (AC)", x = "Time") +
+  theme(panel.grid = element_blank())
+ 
+```
+Most of these highlighted areas are probably *not* sleep, which emphasizes the need for plotting the data and carefully choosing a sleep detection algorithm. We could impose an additional filter, such as requiring that sleep periods are at least one hour long: 
+
+```{r}
+sleep_periods_small = 
+  sleep_periods %>% 
+  filter(sleep == "S") %>% 
+  mutate(length = as.numeric(difftime(period_end, period_start, unit = "mins"))) %>% 
+  filter(length >= 60)
+  
+data %>% 
+  ggplot(aes(x = timestamp, y = ac)) + 
+  geom_line() +
+  geom_rect(data = sleep_periods_small,
+            aes(xmin = period_start,
+                xmax = period_end,
+                ymin = -Inf,
+                ymax = Inf),
+            alpha = 0.5,
+           fill = "#F39C12FF",
+           inherit.aes = FALSE) + 
+  scale_x_datetime(date_labels = "%H:%M", date_breaks = "2 hours") +
+  labs(y = "Activity Counts (AC)", x = "Time") +
+  theme(panel.grid = element_blank())
+
 
 ```
 
+Also note that the nonwear period is scored as sleep by this algorithm, so in practice, we should remove nonwear periods first before applying the sleep detection algorithm. 
 
 
