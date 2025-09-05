@@ -164,7 +164,7 @@ as.numeric(with_tz(times, "America/New_York"))
 ```
 
 :::{.callout-warning}
-Use caution with time zones, especially in the presence of data from different devices and when merging data with timestamps, such as merging with GPS or heart rate data. Shifting time may project some data into a different day/date, which is highly relevant since many summary measures are done at a day/date level.
+Takehome message: Use caution with time zones, especially in the presence of data from different devices and when merging data with timestamps, such as merging with GPS or heart rate data. Shifting time may project some data into a different day/date, which is highly relevant since many summary measures are done at a day/date level. Non-GT3X files and packages other than `read.gt3x` may handle time zones differently, so be sure to check the documentation.
 :::
 
 ### Plotting the data 
@@ -882,7 +882,7 @@ data = ac60 %>%
 ```
 
 ```{r sleep_ck}
-ck = actigraph.sleepr::apply_sadeh(data)
+ck = actigraph.sleepr::apply_cole_kripke(data)
 head(ck)
 ```
 
@@ -892,6 +892,8 @@ We see there's now a `sleep` column in the data that is either `S` (sleep) or `W
 ck %>% 
   count(sleep)
 ```
+
+
 We can plot the sleep/wake predictions. First we need to make a data frame with the sleep period start/ends. 
 
 ```{r ck_plot}
@@ -920,21 +922,28 @@ data %>%
   theme(panel.grid = element_blank())
  
 ```
-Most of these highlighted areas are probably *not* sleep, which emphasizes the need for plotting the data and carefully choosing a sleep detection algorithm. We could impose an additional filter, such as requiring that sleep periods are at least one hour long: 
+
+
+We see that most of these highlighted areas are probably *not* sleep. We can use the Tudor-Locke algorithm on the output of the Cole-Kripke algorithm to detect bedtime and sleep time. 
+
+The object returned by `actigraph.sleepr::apply_tudor_locke` has columns about time of sleep start/end (`in_bed_time`, `out_bed_time`, `onset`, `duration`) and sleep summary metrics like `movement_index` and `fragmentation_index`; see the documentation for a full description of all columns. If the the input data are grouped, the output will have one row per group.
 
 ```{r}
-sleep_periods_small = 
-  sleep_periods %>% 
-  filter(sleep == "S") %>% 
-  mutate(length = as.numeric(difftime(period_end, period_start, unit = "mins"))) %>% 
-  filter(length >= 60)
+sleep_periods_tl = 
+  actigraph.sleepr::apply_tudor_locke(ck)
+
+sleep_periods_tl
+```
+We can plot the sleep period: 
+
+```{r}
   
 data %>% 
   ggplot(aes(x = timestamp, y = ac)) + 
   geom_line() +
-  geom_rect(data = sleep_periods_small,
-            aes(xmin = period_start,
-                xmax = period_end,
+  geom_rect(data = sleep_periods_tl,
+            aes(xmin = onset,
+                xmax = onset + as.period(duration, unit = "minutes"),
                 ymin = -Inf,
                 ymax = Inf),
             alpha = 0.5,
@@ -947,6 +956,6 @@ data %>%
 
 ```
 
-Also note that the nonwear period is scored as sleep by this algorithm, so in practice, we should remove nonwear periods first before applying the sleep detection algorithm. 
+Note that the nonwear period is scored as sleep by this algorithm, so in practice, we should remove nonwear periods first before applying the sleep detection algorithm. 
 
 
