@@ -17,3 +17,4 @@ sandbox/
 # Ignore specific unnamed-chunk outputs anywhere
 **/unnamed-chunk-*
 
+e:/*
