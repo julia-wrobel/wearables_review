@@ -1,0 +1,297 @@
+---
+title: "Continuous Glucose Monitoring (CGM) Tutorial"
+date: "`r Sys.Date()`"
+format: 
+  html:
+    toc: true
+    toc-location: left
+    embed-resources: true
+    code-background: true
+    code-tools: true
+    code-fold: false
+    code-block-border-left: true
+    theme: flatly
+    css: styles.css
+execute:
+  echo: true
+  cache: true
+  message: false
+  warning: false
+editor: source
+---
+
+```{r load packages} 
+#| include: false 
+library(dplyr)
+library(iglu)
+```
+
+CGMs are small wearable devices that measure interstitial glucose levels continuously throughout the day, with some monitors taking measurements as often as every 5 minutes. Data from these monitors provide a detailed quantification of the variation in glucose levels during the course of the day, and thus CGMs play an increasing role in clinical practice. For more on CGMs, see [Rodbard (2016) "Continuous Glucose Monitoring: A Review of Successes, Challenges, and Opportunities."](https://doi.org/10.1089/dia.2015.0417). This tutorial will focus on visualizing raw CGM data, calculating consensus metrics of glycemic control and some additional CGM metrics, and visualizing the data using the Ambulatory Glucose Profile (AGP) based on R package [iglu](https://irinagain.github.io/iglu/). While not comprehensive, it is a good place to get started.
+
+## Prerequisites
+
+This tutorial relies on R package **iglu** with all its dependencies and also utilizes R package **dplyr**
+```{r, eval = FALSE, echo = TRUE}
+# From CRAN
+install.packages("iglu")
+install.packages("dplyr")
+
+# Plain installation from GitHub
+devtools::install_github("irinagain/iglu") 
+
+# For installation with vignette
+devtools::install_github("irinagain/iglu",
+                         build_vignettes = TRUE)
+```
+Alternatively, you can follow via Shiny App [here](https://irinagain.shinyapps.io/shiny_iglu/)
+
+## Data format
+
+Continuous Glucose Monitoring (CGM) data typically has the following three columns, often provided as .csv file.
+
+* Glucose level measurement [in mg/dL] (`"gl"`)
+
+* Timestamp for glucose measurement (`"time"`)
+
+* Subject identification (`"id"`)
+
+`iglu` is designed to work with mg/dL unit of glucose measurements (US standard). In Europe and other countries, it's more common to measure glucose in mmol/L, with conversion as follows:
+$$
+mg/dL = 18.018 \times mmol/L
+$$
+
+
+## Example dataset
+
+We will work with two example datasets that are part of R package iglu.
+
+- `example_data_5_subject` are 5 min frequency Dexcom G4 CGM data from 5 subjects with type 2 diabetes not on insulin therapy. These data are part of a larger study analyzed in [Gaynanova et al. (2020)](https://doi.org/10.1093/biostatistics/kxaa023)
+
+- `example_data_hall` are Dexcom G4 5 min frequency CGM data from 19 subjects with pre-diabetes and type 2 diabetes from [Hall et all. (2018)](https://doi.org/10.1371/journal.pbio.2005143)
+
+<!--Additional public CGM data can be found at [Awesome-CGM by Xu et al. (2024)](https://doi.org/10.5281/zenodo.14541646)-->
+
+## Data visualization
+
+Dexcom G4 CGM measurements with 5 min frequency of a subject with type 2 diabetes.
+
+```{r plot1}
+plot_glu(example_data_1_subject)
+```
+
+We can also look at all subjects at once (all with type 2 diabetes)
+```{r}
+plot_glu(example_data_5_subject)
+```
+
+Horizontal lines by default are at 70 and 180 mg/dL, thresholds representing target glucose levels (in range) for most patients with diabetes. 
+
+## Data availability check
+Based on current consensus recommendations [Battelino et al. (2023)](https://doi.org/10.1016/S2213-8587(22)00319-9), 14 days of monitoring with 70% non-missing data is a minimal data availability standard for outpatient studies to represent glycemic exposure over 3 month period. We can check data availability using `active_percent`
+```{r data missing}
+data_check = active_percent(example_data_5_subject)
+data_check
+```
+To check for consensus recommendation, we can look at number of days (`ndays`) times percent non-missing (`active_percent`), and compare with $14 * 0.7 = 9.8$ threshold.
+```{r}
+data_check %>%
+  dplyr::mutate(threshold = 14 * 0.7,
+                actual = ndays * active_percent/100,
+                meets_consensus = actual >= threshold) %>%
+  dplyr::select(id, ndays, active_percent, actual, threshold, meets_consensus)
+```
+All subjects meet the threshold except Subject 3. For illustrative purposes, we would still keep that subject in later analyses, but in practice, one might want to exclude that subject or do sensitivity checks.
+
+
+## Common summaries of CGM data
+
+**Consensus CGM metrics** described in [Battelino et al. (2023)](https://doi.org/10.1016/S2213-8587(22)00319-9)
+
+* Mean glucose and GMI (Glucose Management Indicator)
+* Time-in-Range (TIR, 70-180 mg/dL), Time in Hypoglycemia (Level 1 and Level 2), Time in Hyperglycemia (Level 1 and Level 2)
+* CV (Coefficient of Variation)
+* GRI (Glucose Risk Index)
+* Glycemic Episodes
+
+
+### Mean and GMI
+
+Mean values match our intuition from data visualization, all are in mg/dL.
+```{r, echo = TRUE}
+mean_glu(example_data_5_subject)
+```
+
+
+GMI is a deterministic transformation of mean on HbA1c scale
+$$
+GMI = 3.31 + 0.02392 \times \text{mean glucose}
+$$
+```{r, echo = TRUE}
+gmi(example_data_5_subject)
+```
+HbA1c is a measure of average glucose over the past 3 months
+
+**Pre-diabetes** - A1c of 5.7%-6.4%; **Diabetes** - A1c> 6.5%
+
+**Typical treatment goal:** A1c < 7%
+
+Based on the above, Subjects 2 and 5 have the highest glucose levels and outside of treatment goal.
+
+### Time in range (TIR)
+
+Most common and accepted metric as treatment target. Calculated as % of time spend within fixed thresholds of $[70, 170]$ mg/dL.
+
+```{r, echo = TRUE}
+in_range_percent(example_data_5_subject,
+                 target_ranges = list(c(70, 180)))
+```
+A typical goal is have TIR over 70%. Again, we see that Subjects 2 and 5 are outside of this goal. Subjects without diabetes typically have over 95% TIR.
+
+
+Time in range can also be judged from the plots.
+```{r, echo = TRUE}
+plot_glu(example_data_5_subject, LLTR = 80, ULTR = 180)
+```
+
+Sometimes, a tight time in range (TTIR) is used (e.g. pregnancy) which corresponds to [70, 140] mg/dL thresholds.
+
+### Glycemic thresholds
+
+It is typical to divide the whole range of measurements into time spent within prespecified thresholds
+
+- Level 2 Hypoglycemia [< 54 mg/dL]
+- Level 1 Hypoglycemia [54 - 70 mg/dL]
+- In-range [70 - 180 mg/dL]
+- Level 1 Hyperglycemia [180 - 250 mg/dL]
+- Level 2 Hyperglycemia [> 250 mg/dL]
+
+The sum across ranges is 100%, giving rise to barplot. Sometimes, Levels 1 and 2 are combined, giving rise to just 3 areas.
+
+
+```{r, echo = TRUE, fig.height = 2}
+plot_glu(example_data_5_subject %>%
+              dplyr::filter(id == "Subject 5"))
+
+plot_ranges(example_data_5_subject %>%
+              dplyr::filter(id == "Subject 5"))
+```
+
+For Subject 5, there is significant time in Hyperglycemia, and no time in Hypoglycemia. In general, Hypoglycemia is more prominent in subjects with Type 1 diabetes.
+
+The ranges can be evaluated separately with any thresholds
+```{r, echo = TRUE}
+below_percent(example_data_5_subject %>%
+              dplyr::filter(id == "Subject 5"))
+above_percent(example_data_5_subject %>%
+              dplyr::filter(id == "Subject 5"))
+```
+
+
+### Coefficient of variation
+
+CV is a global measure of variability (mean/sd). A typical treatment target is below 36%.
+```{r, echo = TRUE}
+cv_glu(example_data_5_subject)
+```
+All 5 subjects meet this treatment goal.
+
+### GRI (Glucose Risk Index)
+
+\small
+More recent measure, based on [Principal Component Analysis of clinicians' ratings of CGM profiles](https://doi.org/10.1177/19322968221085273). The final formula is based on percentages within each level - attempt to arrive at one-number summary of glycemic control that is reflective of both hypo and hyperglycemia.
+$$
+GRI = 3 \times \text{ Lv2 Hypo} + 2.4 \times \text{ Lv1 Hypo}
++ 0.8 \times \text{ Lv1 Hyper} + 1.6 \times \text{ Lv2 Hyper}
+$$
+
+
+```{r, echo = TRUE}
+gri(example_data_5_subject)
+```
+
+GRI $=0$ indicates time-in-range of 100\%. Maximum allowable GRI is 100\%.
+
+### Glycemic Episodes
+
+Glycemic episodes are defined based on consecutive measurements within a certain range.
+
+
+-  High Glucose (Level 1) - $>180$, at least 15 consecutive min, episode ends when $\geq 15$ consecutive min of values $< 180$ 
+- Very High Glucose (Level 2) - $> 250$, at least 15 consecutive min, episode ends when $\geq 15$ consecutive min of values $< 250$ 
+
+Similar for low glucose and very low glucose.
+
+Dexcom CGMs have 5 measurement frequency, hence require 3 consecutive readings.
+
+
+
+
+
+
+```{r, echo = TRUE}
+epicalc_profile(example_data_hall %>% 
+                  dplyr::filter(id == "2133-039"))
+```
+
+
+Alternative numeric output directly
+```{r, echo = TRUE}
+episode_calculation(example_data_hall %>% 
+                  dplyr::filter(id == "2133-039"))
+```
+
+### All consensus metrics at once
+
+All consensus metrics can be computed at once with `all_metrics` call.
+
+```{r, echo = TRUE}
+all_metrics(example_data_5_subject,
+            metrics_to_include = "consensus_only")
+```
+
+Out of all these metrics, TIR is considered the 1st default and most commonly used metric.
+
+## More metrics
+
+
+### Other variability measures
+
+Different types of standard deviation (SD), between days, within time points, all are highly correlated but can be computed at once.
+```{r}
+sd_measures(example_data_5_subject)
+```
+
+
+### MAGE (Mean Amplitude of Glycemic Excursions)
+Uses automatic peak and nadir identification algorithm to compute amplitude of excursions, and then takes an average amplitude for all excursions above 1 standard deviation.
+```{r}
+mage(example_data_5_subject %>%
+       dplyr::filter(id == "Subject 3"), plot = TRUE)
+# numeric
+mage(example_data_5_subject)
+```
+
+### Rate of change
+
+Rate of change is a discrete approximation of 1st derivative associated with glucose curve (discretized using 15 min). Unlike glucose measurements themselves, rate of change is symmetric, and standard deviation (SD) of rate of change can be used a measure of local glucose variability.
+```{r}
+# visual
+hist_roc(example_data_1_subject)
+# numeric
+sd_roc(example_data_5_subject)
+```
+
+### All at once
+
+Multiple additional metrics of glycemic control based on CGM data exist. These can be visualized as a heatmap for a particular study.
+```{r, echo = TRUE, message = FALSE}
+cluster_out = metrics_heatmap(data = example_data_hall)
+```
+
+
+
+::: {.callout-tip}
+Heatmap can be useful to narrow down the metrics list to a few that offer the most distinct information.
+:::
+
+
