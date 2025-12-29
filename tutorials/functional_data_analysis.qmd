@@ -27,89 +27,26 @@ library(ggplot2)
 library(tidyr)
 library(patchwork)
 library(refund)
-```
-
-This tutorial will focus on analyzing the NHANES 2011-2012 and 2013-2014 accelerometry data using tools from functional data analysis (FDA)  
-
-::: {.callout-note}
-The `.gt3x` [file format](https://github.com/actigraph/GT3X-File-Format) is used by ActiGraph accelerometers and contains raw accelerometer data along with metadata including timestamps and device information. Accelerometry data may be provided in other formats, such as `.csv`, but will typically include timestamps, values for acceleration in the X, Y, and Z dimensions, and metadata like participant ID. 
-:::
-
-
-First, we download a GT3X file from the [ActiGraph website](https://actigraphcorp.my.site.com/support/s/article/GT3X-ActiSleep-Sample-Data). The file contains approximately one day of data. 
-
-## Download file 
-
-```{r download data}
-gt3x_file_raw = here::here("data", "accel_data_raw", "GT3X+ (01 day).gt3x")
-gt3x_file = here::here("data", "accel_data_raw", "sample_data.gt3x")
-
-if(!file.exists(gt3x_file)){
-  url = "http://dl.theactigraph.com/demo/files/GT3XPlus-RawData(1-20).zip"
-
-  out_file = here::here("data", "accel_data_raw.zip")
-  if(!file.exists(out_file)){
-    curl::curl_download(url, out_file, mode = "wb")
-  }
-  
-  zip_file = here::here("data", "accel_data_raw.zip")
-  out_dir  = here::here("data", "accel_data_raw")
-  
-  if (!dir.exists(out_dir)) {
-    dir.create(out_dir, recursive = TRUE)
-  }
-  
-  zip_list = unzip(zip_file, list = TRUE)
-  
-  unzip(zip_file, files = zip_list[1]$Name, exdir = out_dir)
-  file.rename(gt3x_file_raw, gt3x_file)
-}
-
-```
-
-## Read in the data 
-
-We read in the data using the `read.gt3x` package. We read in as a dataframe instead of matrix (`asDataFrame = TRUE`) and impute any missing values with zeroes (`imputeZeroes = TRUE`).  The `read.gt3x::read.gt3x` function will read in the data and return a `data.frame` with columns for time, X, Y, Z, and other metadata.  The time column is in POSIXct format.
-
-
-
-```{r read in gt3x}
-#| cache: true
-df = read.gt3x::read.gt3x(path = gt3x_file,
-                          asDataFrame = TRUE,
-                          imputeZeroes = TRUE)
-
-```
-
-
-
-This tutorial provides an introduction to key functional regression models. It is a work in progress and will likely be updated over time. Libraries used in this tutorial are loaded below.
-
-```{r}
-library(tidyverse)
-library(refund)
-library(mgcv)
-library(tictoc)
-library(vbvs.concurrent) # devtools::install_github("jeff-goldsmith/vbvs.concurrent")
 library(viridis)
-library(patchwork)
+library(mgcv)
 ```
 
+This tutorial provides an introduction to several key functional data analysis methods. Note that we will use the `refund` package, `vbvs.concurrent`, and `mgcv` to do functional data analysis. We begin with functional principal components analysis, then move to scalar-on-function regression, and function-on-scalar regression.
 
-Note that we will use the `refund` package, `vbvs.concurrent`, and `mgcv` to do functional data analysis.
 
+## Pupillometer data
 
-# Pupillometer data
+We will use examples based on curves of pupil response to a light stimulus. Some subjects smoke cannabis 60 minutes before the light stimulus and others do not. The goal is to assess whether the pupil response to light differs for those who used cannabis. 
 
-I will be using examples using curves of pupil response to a light stimulus. Some subjects smoke cannabis 60 minutes before the light stimulus and others did not.  The goal is to see whether the pupil response to light differs for those who used cannabis. You can download the data [here](Downloads/pupil.Rdata).
+You can download the data [here](Downloads/pupil.Rdata). 
 
 ```{r}
-load(here::here("Downloads", "pupil.Rdata"))
+load("/Users/JWROBE8/icloud/Documents/websites/tutorials/Downloads/pupil.Rdata")
 
 head(pupil)
 ```
 
-The functional data is percent change in pupil diameter over the course of 5 seconds immediately after the pupil is exposed to a flash of light. This is referred to as the **pupil light response curve**.
+The functional data are percent change in pupil diameter over the course of 5 seconds immediately after the pupil is exposed to a flash of light. This is referred to as the **pupil light response curve**.
 
 
 Variables included in this dataset are:
@@ -124,25 +61,29 @@ Variables included in this dataset are:
 
 
 
-
-
 Curves are shown below:
 
 ```{r}
 
 baseline = pupil %>%
+  mutate(use = factor(use, levels = 1:0, labels = c("Cannabis use", "No use"))) %>%
   ggplot(aes(seconds, percent_change_baseline)) +
-  geom_line(aes(group = id), alpha = 0.2) +
+  geom_line(aes(group = id), alpha = 0.1) +
   geom_smooth(aes(color = factor(use), linetype = factor(use)), se = FALSE) +
   #facet_wrap(~use_group) +
   theme_minimal() +
+  labs(x = "Seconds since light stimulus", y = "Percent change in pupil diameter") +
+  scale_color_viridis(discrete = TRUE) +
   ylim(-60, 20) +
   theme(legend.position = "bottom") 
 
 post = pupil %>%
+  mutate(use = factor(use, levels = 1:0, labels = c("Cannabis use", "No use"))) %>%
   ggplot(aes(seconds, percent_change)) +
-  geom_line(aes(group = id), alpha = 0.2) +
+  geom_line(aes(group = id), alpha = 0.1) +
   geom_smooth(aes(color = factor(use), linetype = factor(use)), se = FALSE) +
+  labs(x = "Seconds since light stimulus", y = "Percent change in pupil diameter") +
+  scale_color_viridis(discrete = TRUE) +
   #facet_wrap(~use_group) +
   theme_minimal() +
   ylim(-60, 20) +
@@ -152,9 +93,9 @@ baseline + post
 ```
 
 
+## FPCA
 
-
-# SoFR
+## SoFR
 
 For scalar-on-function regression with a Gaussian outcome the model we are interested in is 
 
@@ -168,25 +109,25 @@ where:
 - Each $\mathcal{B}_k(t)$ is a *coefficient function*, a regression coefficient for a functional covariate
 - $\epsilon_i$ are normally distributed iid errors
 
-The GLM version of this model (for non-Gaussian outcomes, usually binary) is:
+The generalized linear model (GLM) version of this model (for non-Gaussian outcomes, usually binary) is:
 
 $$g(E[Y_i|X_i, Z_i]) = \beta_0 + \sum_j \beta_jX_{ij} + \sum_k\int_t \mathcal{B}_k(t)Z_{ik}(t)dt,$$
-where $g(\cdot)$ is a known link function (think logit in the case of logistic regression, for example.)
+where $g(\cdot)$ is a known link function (for example, the logit link in logistic regression).
 
 
-## Important practical considerations
+### Important practical considerations
 
 * For SoFR, can't have missing functional observations so need to impute or remove
-  * Default is to use complete.cases (check your sample size in the results!)
+  * The default in many implementations is to use `complete.cases()` (check your sample size in the results).
 * For `pfr()`, binomial responses should be specified as a numeric vector rather than as a matrix or a factor.
 
 
-## refund::pfr()
+### refund::pfr()
 
-First I'll fit a model with a continuous scalar outcome (age) and functional predictor (percent change in pupil size) using the `pfr()` function from the `refund` package.  `pfr` stands for "penalized functional regression" and was originally associated with this paper (ADD REFERENCE).
+First, we fit a model with a continuous scalar outcome (age) and a functional predictor (percent change in pupil size) using the `pfr()` function from the `refund` package. pfr stands for "penalized functional regression".
 
 
-The data need to be set up a specific way for modeling so we will process the data first.
+The data need to be set up in a specific way for modeling, so we will process the data first.
 
 ```{r}
 sofr_df = pupil %>%
@@ -223,7 +164,7 @@ pfr_use = pfr(use ~ lf(percent_change, k = 30, bs = "cr") + age + alcohol,
               data = sofr_df)
 ```
 
-Below I show model summary and default plotting function.
+Below we show the model summary and default plotting function.
 
 ```{r}
 summary(pfr_use)
@@ -248,9 +189,9 @@ coef(pfr_use) %>%
 ```
 
 
-## mgcv::gam()
+### mgcv::gam()
 
-First we need to process the data a little bit differently- some of this is done under the hood in `pfr()`
+You can also fit this model directly using `mgcv::gam()` First, we need to process the data a little bit differently—some of this is done under the hood in `pfr()`.
 
 ```{r}
 ncols = ncol(pupil_mat)
@@ -293,7 +234,7 @@ plot(gam_use)
 
 
 
-### Plotting in mgcv
+#### Plotting in mgcv
 
 
 Here we show how to obtain pointwise confidence intervals for coefficient functions
@@ -319,7 +260,7 @@ upper = beta_hat + 1.96 * se_beta_hat
 ```
 
 
-Plot the results- I am plotting $\beta(t)$ here but could also plot $e^{\beta(t)}$ to get the odds ratio.
+We now plot the results. We are plotting $\beta(t)$ here, but we could also plot $e^{\beta(t)}$ to obtain the odds ratio.
 
 ```{r}
 tibble(time = s_pred, beta_hat = beta_hat, lower = lower, upper = upper) %>%
@@ -332,7 +273,7 @@ tibble(time = s_pred, beta_hat = beta_hat, lower = lower, upper = upper) %>%
 ```
 
 
-# FoSR
+## FoSR
 
 The function-on-scalar regression model is 
 
@@ -343,27 +284,26 @@ where:
 - $Y_i(t)$ is a functional outcome
 - Each $X_{ij}$ is a scalar covariate
 - Each $\beta_j(t)$ is a coefficient function
-- $b_i(t)$ is a subject-specific functional random effect. This captures correlation within subjects over time that is not captured by the mean. This term is not always included in FoSR models, but it's generally a good idea because it gives better inference
-- $\epsilon_i(t)$ are normally distributed iid errors
+- $b_i(t)$ is a subject-specific functional random effect. This captures correlation within subjects over time that is not captured by the mean. This term is not always included in FoSR models, but it is generally a good idea because it yields better inference.
+- $\epsilon_i(t)$ are independent, normally distributed errors.
 
 
-## Important practical considerations
+### Important practical considerations
 
-* Need to dummy code categorical variables (1 vs. 0 for binary, for example)
-* Subject id variable should be a factor
-* Pointwise confidence intervals are technically subject to multiple comparisons issues
+* You need to dummy-code categorical variables (e.g., 1 vs. 0 for binary variables).
+* The subject ID variable should be a factor.
+* Pointwise confidence intervals are technically subject to multiple comparisons issues, and joint bands or bootstrap-based approaches can be preferred.
 
 
 
-## Modeling
 
-For FoSR I like to use `mgcv::gam()` directly. This modeling process happens in 3 steps:
+### Modeling
+
+For FoSR, we can use `mgcv::gam()` directly. This modeling process happens in 3 steps:
 
 1. Fit the mean model $Y_i(t) = \beta_0(t) + \sum_j \beta_j(t)X_{ij} + \epsilon_i(t)$, assuming iid errors across individuals and the domain.
 2. Obtain residuals from the model in step (1) and decompose these into principle directions of variation (eigenfunctions) using FPCA.
 3. Refit the model using top eigenfunctions from step (2) as random effects. This step allows us to estimate $b_i(t)$ and obtain more valid inference for our coefficient function.
-
-
 
 
 These steps are implemented below:
@@ -413,9 +353,9 @@ summary(fosr_mod)
 ```
 
 
-## Plotting
+### Plotting
 
-Here we will plot results much the same way we did when plotting results for SoFR 
+Here we will plot results much the same way we did when plotting results for SoFR.
 
 ```{r}
 # put required data inputs into a dataframe
@@ -446,201 +386,17 @@ tibble(beta1 =  coef_est$fit[, 2],
 
 
 
-# FoFR
 
-Function-on-function regression is a class of models where the outcome is a function and the covariate(s) is/are also functions. There are different formulations of this model and which one you pick really depends on what your data looks like and what questions you're trying to answer.
 
-The main models to consider are summarized below. 
 
-## Important practical considerations
 
-
-FLCM: 
-
-- Spline estimates aren't penalized (I believe)
-- To get confidence intervals I would recommend the bootstrap
-- I'm not sure that you can include scalar predictors 
-
-FoFR and Functional historical model implemented in `refund::pffr()`
-
-* Can't have missing functional observations so need to impute or remove
-  * Code will break if you have missing data
-* There is a lot more you can do with `pffr` than I know how to do without digging into it.
-
-## Functional linear concurrent model (FLCM)
-
-A functional linear concurrent model describes the relationship between a functional response and a functional predictor, where the effect of the predictor at each time point is modeled by a time-varying coefficient function, allowing the association to evolve dynamically over time. A functional linear concurrent model can be thought of as performing separate linear regressions at each time point $t$, but with the added constraint that the regression coefficients vary smoothly over $t$, ensuring temporal coherence in the estimated relationship between the functional predictor and response.
-
-This model is given by: 
-
-$$Y_i(t) =   \beta_0(t) + \sum_{j} \beta_j(t)X_{ij}(t)  + b_i(t) +  \epsilon_i(t)$$
-
-
-
-### Code
-
-```{r}
-	flcm = vb_concurrent(percent_change ~ percent_change_baseline | seconds, 
-	                          id.var = "id",
-                            data = pupil, 
-	                          Kt = 20, # number of spline basis functions 
-	                          Kp = 10 # number of FPCs to estimate
-	                          )
-
-
-```
-
-Plotting the coefficient function.
-
-```{r}
-flcm$beta.pm %>%
-  ggplot(aes(seconds, percent_change_baseline)) +
-  geom_line()
-```
-
-
-
-## Historical functional model
-
-A historical functional model extends the functional linear concurrent model by allowing the response at time $t$ to depend not only on the predictor at $t$ but also on its past values.
-
-- Useful for when function and covariate are observed on the same domain, and you don't want the covariate measurements from the future to predict the response in the present.
-
-
-$$Y_i(t) =   \beta_0(t) + \sum_{j}\int_{s = 0}^t \beta_j(t, s)X_{ij}(s)ds  + b_i(t) +  \epsilon_i(t)$$
-
-### Code
-
-For this and for the FoFR model, we will use the `pffr` function from the refund package.  First we have to rearrange the data to work with `pffr`.
-
-
-```{r}
-pupil_noMissing = pupil %>%
-  group_by(id) %>%
-  mutate(missing = sum(is.na(percent_change_baseline))+ sum(is.na(percent_change))) %>%
-  ungroup() %>%
-  filter(missing == 0)
-
-
-
-nsubj = length(unique(pupil_noMissing$id)) # number of subjects
-ntime = length(unique(pupil_noMissing$seconds)) # number of time points, assuming subjects are measured on the same grid
-	
-y_fofr = matrix(pupil_noMissing$percent_change, nrow = nsubj, ncol = ntime, byrow = TRUE)
-x_fofr = matrix(pupil_noMissing$percent_change_baseline, nrow = nsubj, ncol = ntime, byrow = TRUE)
-
-fofr_df = pupil_noMissing %>%
-  select(id, use, age) %>% distinct() %>% as.data.frame()
-
-
-fofr_df$y = y_fofr
-fofr_df$x = x_fofr
-
-t = s = unique(pupil$seconds)
-
-# need to either impute or remove missing values in the x
-fofr_df = fofr_df[complete.cases(fofr_df),]
-```
-
-
-Now we can do the modeling- I'm only going to model the use group to speed this up, but also because I believe the results are more interesting.
-
-```{r, cache = TRUE}
-
-fhist_mod = pffr(y ~ s(id, bs = "re") + ff(x, xind = s, limits = "s<t",
-		                                       splinepars = list(bs = "ps", 
-		                                                      k= c(5, 5))), 
-		             yind = t, filter(fofr_df, use == 1))
-
-
-
-```
-
-
-where
-
-- `s(seconds, bs = "re")`: subject specific random intercept $b_i(t)$
--  ` k= c(15, 15)`: defines number of basis functions for the surface (default is 5, which is probably too few but I'm using that right now because it is faster)
-
-
-
-```{r}
-summary(fhist_mod)
-```
-
-
-Finally, do the plotting. Now we have estimated a coefficient surface instead of a coefficient function.
-
-
-
-```{r}
-# extract surface for plotting
-fhist_surf = coef(fhist_mod, n1 = 100, n2 = 100)$smterms$"ff(x,s)"$coef %>%
-  select(s = x.smat, t = x.tmat, value = value) %>% 
-  as_tibble() %>%
-  mutate(value = ifelse(s>t, NA, value))
-
-fhist_surf %>%
-  ggplot(aes(s, t)) + 
-  geom_tile(aes(fill = value, col = value)) + 
-  scale_fill_viridis_c() +
-  scale_colour_viridis_c() +
-  theme(legend.position = "bottom")
-```
-
-
-
-## FoFR model
-
-The functional outcome and functional covariate can (but don't necessarily need to be) on the same domain. Allows the functional response $Y(t)$ to depend on the entire functional predictor(s).
-
-
-$$Y_i(t) =  \beta_0(t) + \sum_{j}\int_s \beta_j(t, s)X_{ij}(s)ds  + b_i(t) +  \epsilon_i(t)$$
-
-
-
-### Code
-
-This is very similar to the functional historical model, and I will use the same version of the data. For modeling, I'm also adding a scalar covariate (use) which could be added to the historical model as well. I'm also removing the functional random intercept so that it runs a bit faster, but would recommend keeping this in for modelling when you also want inference.
-
-```{r,  cache = TRUE}
-
-fofr_mod = pffr(y ~ ff(x, xind = s) + age, 
-		             yind = t, fofr_df)
-
-```
-
-
-Model summary
-
-
-```{r}
-summary(fofr_mod)
-```
-
-
-Plotting
-
-
-```{r}
-fofr_surf = coef(fofr_mod, n1 = 100, n2 = 100)$smterms$"ff(x,s)"$coef %>%
-  select(s = x.smat, t = x.tmat, value = value) %>% 
-  as_tibble() 
-
-fofr_surf %>%
-  ggplot(aes(s, t)) + 
-  geom_tile(aes(fill = value, col = value)) + 
-  scale_fill_viridis_c() +
-  scale_colour_viridis_c() +
-  theme(legend.position = "bottom")
-```
-
-# Resources
+## Resources
 
 - I highly recommend this [FDA with R book](https://www.amazon.com/Functional-Analysis-Monographs-Statistics-Probability/dp/1032244712/ref=sr_1_6?crid=UEKJYVS8EV6R&keywords=crainiceanu&qid=1698108861&sprefix=crainiceanu%2Caps%2C83&sr=8-6)
 
 
 Some papers about models covered in this tutorial:
+
 - [Functional data analysis with pupillometer data](https://karger.com/dib/article/8/1/83/906653)
 - [SoFR](https://pmc.ncbi.nlm.nih.gov/articles/PMC3285536/)
 - [Functional linear concurrent model](https://pmc.ncbi.nlm.nih.gov/articles/PMC5457356/)
