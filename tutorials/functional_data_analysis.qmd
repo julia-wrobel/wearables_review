@@ -20,7 +20,7 @@ execute:
 editor: source
 ---
 
-```{r load packages} 
+```{r load_packages} 
 #| include: false 
 library(tidyverse)
 library(registr)
@@ -28,6 +28,14 @@ library(patchwork)
 library(refund)
 library(viridis)
 library(mgcv)
+
+knitr::opts_chunk$set(echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 9,
+  fig.height = 4,
+  fig.path = '../figures/'
+)
 ```
 
 This tutorial provides an introduction to several key functional data analysis methods. Note that we will use the `refund`, `registr`, `vbvs.concurrent`, and `mgcv` packages to do functional data analysis. We begin with functional principal components analysis, then move to scalar-on-function regression, function-on-scalar regression, and curve registration.
@@ -414,7 +422,7 @@ pupil_reg <- register_fpca(
 
 Results from registration are plotted below.
 
-```{r, registration_plot}
+```{r registration_plot, fig.width = 12, fig.height = 4}
 ## Extract with original + registered time
 pupil_Y <- pupil_reg$Y %>%
   mutate(
@@ -457,6 +465,7 @@ p_unreg + p_warp + p_reg
 The left panel shows the original, unregistered curves. There is some variability in the timing of the minimum pupil diameter, and some curves begin recovering earlier than others. The middle panel shows the estimated warping functions, which map original time to registered time. The dashed red line represents "no warping"; curves that deviate from this line indicate subjects whose trajectories needed to be stretched or compressed in time to align key features with the group. Finally, the right panel shows the registered curves, after applying these subject-specific time transformations. We see that the point of maximal constriction is now better aligned across individuals, reducing timing-driven variability and isolating differences in curve shape.
 
 Registration can therefore be a powerful preprocessing step before FPCA or functional regression models when phase variation (timing differences) is present and scientifically meaningful to separate from amplitude variation.
+
 
 
 ## Resources
