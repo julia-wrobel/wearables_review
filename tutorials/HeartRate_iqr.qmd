@@ -1,0 +1,199 @@
+---
+title: "Heart Rate (HR) Tutorial with R package ihr"
+date: "`r Sys.Date()`"
+format: 
+  html:
+    toc: true
+    toc-location: left
+    embed-resources: true
+    code-background: true
+    code-tools: true
+    code-fold: false
+    code-block-border-left: true
+    theme: flatly
+    css: styles.css
+execute:
+  echo: true
+  cache: true
+  message: false
+  warning: false
+editor: source
+---
+
+```{r load packages} 
+#| include: false 
+library(dplyr)
+library(ihr)
+```
+
+This tutorial will focus on visualizing HR data, calculating overall and temporall HR metrics, and visualizing the data using the Ambulatory Heart Rate Profile (AHP) based on R package [ihr](https://github.com/IrinaStatsLab/ihr). The package is designed to help in the analyses of heart rate data from wearables (i.e. FitBit, Apple Watches, etc.) which commonly rely on photoplethysmography (PPG) technology, and use internal processing to report heart rate in beats per minute.  
+
+To install R package **ihr** with all its dependencies as well as supplemental R package **dplyr**, follow
+```{r, eval = FALSE, echo = TRUE}
+# From CRAN
+install.packages("dplyr")
+
+# Plain installation from GitHub
+devtools::install_github("IrinaStatsLab/ihr") # ihr package 
+
+# For installation with vignette
+devtools::install_github("IrinaStatsLab/ihr", build_vignettes = TRUE)
+```
+
+## Example dataset and data format
+
+ihr comes with example data (`example_heart_5`) from 5 subjects whose heart rate were tracked with FitBit devices. This data is publicly available from [Kaggle](https://www.kaggle.com/datasets/arashnic/fitbit/versions/1/data). For convenience, 1 subject data is available as `example_heart_1`. We will use both depending on the function to better highlight functionality.
+
+```{r}
+library(ihr)
+data("example_heart_1")
+data("example_heart_5")
+```
+
+
+HR data typically has the following three columns.
+
+* Heart rate level [in beats per minute, bpm] (`"hr"`)
+
+* Timestamp for measurement (`"time"`)
+
+* Subject identification (`"id"`)
+
+```{r, include = TRUE}
+head(`example_heart_5`)
+```
+
+The frequency can vary. In this dataset, HR is reported every 5 seconds, but in some cases it could be agglomerated at 1 minute or 5 minute level, like Fitbit HR data from All of Us. 
+
+
+## Data visualization - time series
+
+Due to the massive number of observations that heart rate data can have, `plot_hr` supports a time range argument. Using `from` and `to`, the function will plot the heart rate data only from the specified time interval [from, to). If an argument is not provided to one of the two, the function defaults to the first and last observation, respectively. 
+
+```{r fig.width= 7}
+plot_hr(example_heart_1, from = "2016-04-30", to = "2016-05-02")
+```
+
+## Data visualization - Ambulatory Heart Rate Profile (AHP)
+
+AHP is one stop place to visualize HR data and main summary metrics for 1 subject at a time. 
+
+```{r}
+#| fig-width: 12
+#| fig-height: 10
+#| fig.align: center
+# Plot high level overview of a subject's heart rate data
+ahp(example_heart_1)
+```
+It provides the following key information:
+
+- Overall monitoring duration and data completeness: Start/end date, overall duration in days, percentage of time that the HR is measured (non-missing) within the total period
+
+- Traditional HR summary measures:
+  - **Resting heart rate (RHR)**, defined as the average HR value between 3am and 7am
+  - **Heart Rate Reserve (HRR)**, difference between maximal HR and RHR
+  - **Maximal Heart Rate**, maximal HR within the observation period
+  
+- Bar plot summarizing percentage of time spent within various physical activity stages, the thresholds adapt to each subject's individual profile based on their values of RHR and HRR
+- Quantile plot summarizing 24-hour HR via median and percentiles corresponding to extremes (5% and 95%) and IQR range (25th, 50th). The median and quantiles are automatically smoothed via local polynomial regression fit (`loess`) with span being 0.3 by default
+- Daily plots (defauls shows last 2 weeks) with colors corresponding to physical activity thresholds
+
+## Data availability check
+
+`ahp` already displays percent of data completeness, however it is often desirable to get these numbers simultaneously for all individuals, or look at data availability within certain time periods, especially if device non-wear is an issue. This can be achieved by separate calls to `percent_nonmissing` and `missingness_by_period`.
+
+```{r, cache = TRUE}
+percent_nonmissing(example_heart_5)
+missingness_by_period(example_heart_5)
+```
+
+For instance, we can see that the 3rd subject with id 4558609924 has 94% missingness in the night period, which is reflected by the gap in the AHP plot and also suggests that their RHR identification may be less reliable
+
+```{r}
+example_heart_5 %>%
+  dplyr::filter(id == "4558609924") %>%
+  plot_ahp
+```
+
+## Batch computation of standard metrics
+
+To compute metrics like resting heart rate (RHR, average HR between 3am and 7am), max heart rate, and heart rate reserve (HRR, difference between RHR and max HR) for all subjects at once, we can use
+```{r}
+calculate_RHR(example_heart_5)
+calculate_HRR(example_heart_5)
+```
+Note that HRR can also be modified to use min HR instead of RHR, which could be a good option when all night time measurements are missing.
+```{r}
+calculate_HRR(example_heart_5, method = "max-min")
+```
+
+## More complex temporal HR metrics
+
+### Mean Amplitude of Heart rate Excursions (MAHE)
+
+MAHE uses an automated peak identification algorithms to identify local heart rate excursions and their amplitudes. The plot below illustrates this identification process on selected profile.
+
+```{r fig.width = 7}
+mahe(example_heart_1, to = "2016-04-13", plot = T, show_ma = T, show_excursions = T)
+```
+
+The amplitudes above one standard deviation are averaged to create a final MAHE value (in beats per minute).
+
+```{r}
+mahe(example_heart_1)
+```
+
+Unlike HRR, which is a global measure of HR magnitude, MAHE captures a typical amplitude of local excursion.
+
+### HR episodes by stage
+
+To complement MAHE, individual-specific physical activity stages (as shown in AHP) can be used to define stage-specific episodes - consecutive periods of HR being one of the extreme stages relative to light activity baseline (HR values in RHR + (20% - 40%) HRR range).
+
+- Sedentary/sleep (HR values <20% HRR + RHR)
+- Moderate (40–59% HRR + RHR)
+- Vigorous (>=60% HRR + RHR)
+
+By default, to be counted as an episode, HR values must be within the stage for at least 15 consecutive minutes, wheres the episode ends when HR return to outside the range for at least 15 minutes.
+
+For each episode, the function computes summary statistics, including:
+
+1. Average number of episodes per day.
+2. Mean episode duration (in minutes).
+3. Mean HR levels during episodes (in bpm).
+4. Total number of episodes.
+
+To visualize this computation, consider
+```{r fig.width= 8, fig.height = 6}
+epicalc_profile(example_heart_1)
+```
+
+with summaries also returned independenty by
+```{r}
+episode_calculation(example_heart_1)
+```
+
+
+
+
+### HR Rate of Change (ROC)
+
+Rate of Change is a measure of local HR variability, based on the discrete approximation of the derivative. It is typically summarized via standard deviation of ROC (the large the value, the more rapidly HR changes on average), which is convenient for downstream analyses. 
+
+```{r}
+sd_roc(example_heart_5)
+```
+
+
+Visual representations of ROC via histogram and scatteplots can provide additional individual-specific context. Histogram tends to illustrate symmetric pattern (corresponding to HR local decreases and increases)
+
+```{r fig.width= 7}
+hist_roc(example_heart_1)
+```
+
+Note that the outlying values are possible since ROC is computed on the original data (without smoothing), and thus individual irregular measurements can lead to very high ROC amplitude. It could be helpful for diagnosing outliers for potential removal.
+
+A scatter plot between an ROC value, and the corresponding heart rate associated with the value allows to see the change in HR relative to baseline, with higher heart rate and absolute ROC values representing peak physical activity from a user.
+
+```{r fig.width = 7}
+scatter_roc(example_heart_1)
+```
