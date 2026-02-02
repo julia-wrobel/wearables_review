@@ -1,0 +1,482 @@
+---
+title: "Functional Data Analysis Tutorial"
+date: "`r Sys.Date()`"
+format: 
+  html:
+    toc: true
+    toc-location: left
+    embed-resources: true
+    code-background: true
+    code-tools: true
+    code-fold: false
+    code-block-border-left: true
+    theme: flatly
+    css: styles.css
+execute:
+  echo: true
+  cache: true
+  message: false
+  warning: false
+editor: source
+---
+
+```{r load_packages} 
+#| include: false 
+library(tidyverse)
+library(registr)
+library(patchwork)
+library(refund)
+library(viridis)
+library(mgcv)
+
+knitr::opts_chunk$set(echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 9,
+  fig.height = 4,
+  fig.path = '../figures/'
+)
+```
+
+This tutorial provides an introduction to several key functional data analysis methods. Note that we will use the `refund`, `registr`, `vbvs.concurrent`, and `mgcv` packages to do functional data analysis. We begin with functional principal components analysis, then move to scalar-on-function regression, function-on-scalar regression, and curve registration.
+
+
+## Pupillometer data
+
+We will use examples based on curves of pupil response to a light stimulus. Some subjects smoke cannabis 60 minutes before the light stimulus and others do not. The goal is to assess whether the pupil response to light differs for those who used cannabis. 
+
+The data are described in greater detail in [Steinhart et al. (2023)](https://pmc.ncbi.nlm.nih.gov/articles/PMC10055178/), which outlines an end-to-end pipeline for collecting and processing pupil response data from a specific pupillometer device, and in [Godbole et al. (2024)](https://karger.com/dib/article/8/1/83/906653) which applies functional data analysis methods to this dataset.
+
+```{r}
+pupil = readRDS(here::here("data", "pupil.rds"))
+
+head(pupil)
+```
+
+The functional data are percent change in pupil diameter over the course of 5 seconds immediately after the pupil is exposed to a flash of light. This is referred to as the **pupil light response curve**.
+
+
+Variables included in this dataset are:
+
+- `id`: subject id
+- `use`: whether a subject used cannabis, `1=use` and `0=no use`
+- `age`: agein years
+- `alcohol`: average weekly number of alcoholic beverages
+- `seconds`: the functional domain
+- `percent_change`: the pupil light response curve collected 60 minutes **after** smoking cannabis for those with `use = 1` and after an equivalent no-smoking rest time for those with `use = 0`
+
+
+
+The pupil light response curves are shown below. On the x-axis, 0 seconds represents the time of the light stimulus. Following the stimulus, pupils constrict, reaching a point of minimal constriction, and then begin to rebound toward their baseline size. On average, individuals who smoked cannabis 60 minutes prior to testing (purple line) exhibit less constriction compared with those who did not smoke (yellow line).
+
+```{r}
+pupil %>%
+  mutate(use = factor(use, levels = 1:0, labels = c("Cannabis use", "No use"))) %>%
+  ggplot(aes(seconds, percent_change)) +
+  geom_line(aes(group = id), alpha = 0.1) +
+  geom_smooth(aes(color = use), se = FALSE) +
+  labs(x = "Seconds since light stimulus", y = "Percent change in pupil diameter") +
+  scale_color_viridis(discrete = TRUE) +
+  theme_minimal() +
+  theme(legend.position = c(0.4, 0.75), legend.title = element_blank()) 
+  
+```
+
+
+## FPCA
+
+Let $Y_i(t)$ denote the functional outcome for subject $i$ observed over
+$t \in \mathcal{T}$. A standard functional principal components analysis (FPCA) model can be written as
+
+$$
+Y_i(t) = \mu(t) + \sum_{k=1}^{K} \xi_{ik} \, \phi_k(t) + \epsilon_i(t),
+$$
+
+where:
+- $\mu(t)$ is the population mean
+- Each $\phi(t)$ is an eigenfunction (functional principal component)
+- $\xi_{ik}$ are subject-specific FPC scores
+- $\epsilon_i$ is an error process
+
+
+### Modeling
+
+We fit the FPCA model to the pupil light response curves using `refund::fpca.face()`. The argument `pve = 0.99` specifies that the number of functional principal components retained should explain 99% of the total variance, which in this case results in 4 components.
+
+
+```{r}
+fpca_mat = pupil %>%
+  select(id, seconds, percent_change) %>%
+  filter(seconds < 4) %>%
+  pivot_wider(names_from = seconds, values_from = percent_change,
+              names_prefix = "t_") %>%
+  select(-id) %>%
+  as.matrix()
+
+# Drop rows with all NA (no observed curve)
+keep_rows = apply(fpca_mat, 1, function(x) any(!is.na(x)))
+fpca_mat = fpca_mat[keep_rows, , drop = FALSE]
+
+
+pupil_fpca = fpca.face(fpca_mat, pve = 0.99)
+
+```
+
+
+Next, we plot the estimated eigenfunctions and create a scree plot to show the proportion of variance explained by each principal component.
+
+```{r}
+eigs_df = as.data.frame(pupil_fpca$efunctions)
+colnames(eigs_df) = paste0("Phi", seq_len(pupil_fpca$npc))
+seconds = as.numeric(str_remove(colnames(fpca_mat), "t_"))
+eigs_df$seconds = seconds
+
+
+# Plot first few eigenfunctions (e.g., first 3)
+eigen_plot = eigs_df %>%
+  pivot_longer(starts_with("Phi"),
+               names_to = "component",
+               values_to = "value") %>%
+  filter(component %in% paste0("Phi", 1:3)) %>%
+  ggplot(aes(x = seconds, y = value, colour = component)) +
+  geom_line() +
+  labs(x = "Seconds", y = "Eigenfunction value",
+       title = "Leading FPCs") +
+  theme_minimal() +
+  theme(legend.position = c(0.6, 0.8))
+
+# Variance explained by each component
+evalues <- pupil_fpca$evalues
+var_explained <- evalues / sum(evalues)
+
+scree_plot = tibble(k = seq_along(evalues),
+  FVE = var_explained,
+  cumFVE = cumsum(var_explained)) %>%
+  ggplot(aes(x = k, y = FVE)) +
+  geom_point() +
+  geom_line() +
+  labs(x = "Component", y = "Percent variance explained",
+       title = "Scree plot") +
+  theme_minimal()
+
+
+eigen_plot + scree_plot
+```
+
+The eigenfunctions help us understand how subjects vary around the mean pupil light response trajectory. Each eigenfunction represents a dominant “mode of variation,” and subjects differ according to their FPC scores. A subject with a large positive score on a particular $\phi_k(t)$ will show deviations from the mean curve in the same direction as that eigenfunction, whereas a subject with a large negative score will show deviations in the opposite direction. Scores near zero indicate curves that are close to the population mean.
+
+In this dataset, the first FPC (red curve) captures the largest source of variability and primarily reflects overall amplitude differences in the constriction and recovery phases: subjects with high positive scores show relatively less constriction, while those with negative scores show deeper constriction than the mean. The second FPC (green curve) captures differences in timing and curvature, distinguishing subjects who constrict earlier versus later.
+
+The scree plot on the right shows the fraction of total variance explained by each component. The first component explains over 75% of the total variability, meaning that most subject-to-subject differences can be summarized by a single dominant pattern. The second and third components capture additional, but comparatively smaller, structure, while higher-order components contribute very little variance.
+
+## SoFR
+
+For scalar-on-function regression with a Gaussian outcome the model we are interested in is 
+
+$$Y_i = \beta_0 + \sum_j \beta_jX_{ij} + \sum_k\int_t \mathcal{B}_k(t)Z_{ik}(t)dt + \epsilon_i,$$
+where:
+
+- $Y_i$ is a scalar outcome
+- Each $X_{ij}$ is a scalar covariate
+- Each $\beta_j$ is a regression coefficient for a scalar covariate
+- Each $Z_{ik}(t)$ is a functional covariate
+- Each $\mathcal{B}_k(t)$ is a *coefficient function*, a regression coefficient for a functional covariate
+- $\epsilon_i$ are normally distributed iid errors
+
+The generalized linear model (GLM) version of this model (for non-Gaussian outcomes, usually binary) is:
+
+$$g(E[Y_i|X_i, Z_i]) = \beta_0 + \sum_j \beta_jX_{ij} + \sum_k\int_t \mathcal{B}_k(t)Z_{ik}(t)dt,$$
+where $g(\cdot)$ is a known link function (for example, the logit link in logistic regression).
+
+
+### Important practical considerations
+
+* For SoFR, can't have missing functional observations so need to impute or remove
+  * The default in many implementations is to use `complete.cases()` (check your sample size in the results).
+* When implementing using `refund::pfr()`, binomial responses should be specified as a numeric vector rather than as a matrix or a factor.
+
+
+The SoFR model can be fit using either `refund::pfr()` or `mgcv::gam()`. Below we briefly demonstrate using `refund::pfr()`.
+
+### refund::pfr()
+
+We first fit a model with a continuous scalar outcome (`age`) and a functional predictor (percent change in pupil size) using the `pfr()` function from the `refund` package. `pfr` stands for *penalized functional regression*.
+
+
+The data need to be organized in a specific way for modeling, so we first reshape the dataset.
+
+```{r}
+sofr_df = pupil %>%
+  pivot_wider(names_from = seconds, values_from = percent_change, 
+                names_prefix = "t_") %>%
+  as.data.frame()
+
+pupil_mat = sofr_df %>% select(starts_with("t_")) %>% as.matrix()
+
+# reorganize data for use with refund::pfr() function
+sofr_df$percent_change = pupil_mat
+```
+
+We first fit a SoFR model with a continuous scalar outcome (`age`):
+
+```{r}
+pfr_age = pfr(age ~ lf(percent_change, k = 30, bs = "cr"),
+              data = sofr_df)
+```
+
+We can examine the results using the built-in `summary()` and `plot()` methods:
+
+```{r}
+summary(pfr_age)
+
+plot(pfr_age)
+```
+
+The `summary()` output shows that the smooth term for the functional predictor `percent_change` is not statistically significant (F = 0.353, p = 0.703), suggesting that the shape or magnitude of the pupil light response curve is not meaningfully associated with age in this dataset.
+
+
+The `plot()` output displays the estimated functional coefficient relating the pupil light response curve to age. If the functional predictor meaningfully explained variation in age, we would expect to see a clear deviation from zero with confidence bands that do not overlap zero. Instead, the function is nearly flat and the confidence intervals cover zero everywhere, reinforcing the conclusion that age is not strongly related to the functional pupil response.
+
+Next, we fit a SoFR model with a binary outcome (`use` = cannabis use), controlling for the effects of age and alcohol consumption history as scalar covariates.
+
+```{r}
+pfr_use = pfr(use ~ lf(percent_change, k = 30, bs = "cr") + age + alcohol,
+              family = binomial,
+              data = sofr_df)
+```
+
+Below we show the model summary. The `summary()` output for the model with cannabis use as the outcome shows that the functional smooth term for the pupil light response curve is statistically significant, indicating that the shape of the pupil response trajectory is associated with cannabis use status. The effective degrees of freedom (edf > 2) suggest that this effect is nonlinear, meaning the nature of the association varies across the time domain rather than acting as a linear weighting of the curve.
+
+```{r}
+summary(pfr_use)
+```
+
+
+We now extract coefficients and confidence intervals to visualize in `ggplot`. In many cases, I prefer this approach to the default `plot()` method because it allows greater customization.
+
+
+```{r beta_sofr}
+# You can also extract and plot the coefficient function and its 95% C.I. yourself:
+coef(pfr_use) %>%
+  rename(time = percent_change.argvals,
+         beta_hat = value) %>%
+  mutate(lower = beta_hat - 1.96 * se,
+         upper = beta_hat + 1.96 * se) %>%
+    ggplot(aes(time, beta_hat)) + 
+  geom_line() +
+  geom_line(aes(y = lower), linetype = 2, color = "blue") +
+  geom_line(aes(y = upper), linetype = 2, color = "blue") +
+  geom_hline(yintercept = 0, linetype = 3, color = "red") +
+  theme_minimal()
+```
+
+This figure shows the estimated functional coefficient relating the pupil light response curve to cannabis use, along with 95% pointwise confidence intervals (dashed blue lines). The solid black line represents how the log-odds of cannabis use change as a function of different regions of the pupil response curve. The coefficient function is clearly not flat, reinforcing the evidence of a nonlinear effect suggested by the model summary.
+
+
+## FoSR
+
+The function-on-scalar regression model is 
+
+$$Y_i(t) = \beta_0(t) + \sum_j \beta_j(t)X_{ij} + b_i(t) + \epsilon_i(t),$$
+
+where:
+
+- $Y_i(t)$ is a functional outcome
+- Each $X_{ij}$ is a scalar covariate
+- Each $\beta_j(t)$ is a coefficient function
+- $b_i(t)$ is a subject-specific functional random effect. This captures correlation within subjects over time that is not captured by the mean. This term is not always included in FoSR models, but it is generally a good idea because it yields better inference.
+- $\epsilon_i(t)$ are independent, normally distributed errors.
+
+
+### Important practical considerations
+
+* You need to dummy-code categorical variables (e.g., 1 vs. 0 for binary variables).
+* The subject ID variable should be a factor.
+* Pointwise confidence intervals are technically subject to multiple comparisons issues, and joint bands or bootstrap-based approaches can be preferred.
+
+
+### Modeling
+
+For FoSR, we will use `mgcv::gam()` directly. This modeling process happens in 3 steps:
+
+1. Fit the mean model $Y_i(t) = \beta_0(t) + \sum_j \beta_j(t)X_{ij} + \epsilon_i(t)$, assuming iid errors across individuals and the domain.
+2. Obtain residuals from the model in step (1) and decompose these into principle directions of variation (eigenfunctions) using FPCA.
+3. Refit the model using top eigenfunctions from step (2) as random effects. This step allows us to estimate $b_i(t)$ and obtain more valid inference for our coefficient function.
+
+
+These steps are implemented below, where we fit a model with the pupil light response curve as the functional outcome and cannabis use as a binary scalar covariate.
+
+```{r}
+##########################################################################################
+## step 1
+mean_mod = mgcv::gam(percent_change ~ s(seconds, k=30, bs="cr") + 
+                          s(seconds, by=use, k=30, bs = "cr"), 
+                  data = pupil, method = "REML")
+
+########################################################################################## 
+## step 2
+## Create a matrix of residuals
+
+resid_df = pupil %>%
+  filter(!is.na(percent_change)) %>%
+  select(id, seconds) %>%
+  mutate(resid = mean_mod$residuals) %>%
+  pivot_wider(names_from = seconds, values_from = resid, names_prefix = "resid.")
+  
+resid_mat = as.matrix(resid_df[,-1])
+rownames(resid_mat) = resid_df$id
+
+fpca_results = fpca.face(resid_mat, argvals = unique(pupil$seconds), knots = 15)
+eigenfunctions = as.data.frame(fpca_results$efunctions)
+colnames(eigenfunctions) = paste0("Phi", seq(1, fpca_results$npc))
+eigenfunctions$seconds = unique(pupil$seconds)
+pupil = pupil %>% left_join(., eigenfunctions, by = "seconds") %>%
+  as_tibble() %>%
+  arrange(id, seconds) %>%
+  mutate(id = factor(id))
+
+##########################################################################################
+# Step 3
+
+fosr_mod = mgcv::bam(percent_change ~ 
+                            s(seconds, k=30, bs="cr") + 
+                            s(seconds, by=use, k=30, bs = "cr") + 
+                            s(id, by = Phi1, bs="re") + 
+                            s(id, by = Phi2, bs="re")+
+                            s(id, by = Phi3, bs="re") + 
+                            s(id, by = Phi4, bs="re"), 
+                          method = "fREML", data = pupil, discrete = TRUE)
+summary(fosr_mod)
+
+```
+
+The model summary shows results from the FoSR model with the pupil light response trajectory as the functional outcome and cannabis use as a scalar predictor. The baseline smooth term `s(seconds)` is highly significant, which is expected because it captures the overall mean pupil response curve over time for individuals who did not use cannabis. The key FoSR effect of interest is the interaction smooth `s(seconds):use`, which is also statistically significant. This indicates that the pupil light response trajectory differs systematically between cannabis users and non-users across the time domain. The random effect smooths `s(id):Phi1` through `s(id):Phi4` are all highly significant as well, confirming that the FPCA-based functional random effects capture substantial subject-specific deviation around the mean trend. Including these terms improves inference by appropriately accounting for within-subject correlation across time.
+
+### Plotting
+
+Here we will plot results much the same way we did when plotting results for SoFR.
+
+```{r}
+# put required data inputs into a dataframe
+# need to have same names as covariates in model
+s_pred = seq(0,1, length.out = 100)
+df_pred = pupil %>%
+  filter(id == first(id))
+
+# call predict.gam
+coef_est = predict(fosr_mod, newdata = df_pred, type = "terms", se.fit = TRUE)
+
+
+
+tibble(beta1 =  coef_est$fit[, 2],
+       seconds = df_pred$seconds,
+       se_beta1 = coef_est$se.fit[,2],
+       lower = beta1 - 1.96 * se_beta1,
+       upper = beta1 + 1.96 * se_beta1) %>%
+    ggplot(aes(seconds, beta1)) + 
+  geom_line() +
+  geom_line(aes(y = lower), linetype = 2, color = "blue") +
+  geom_line(aes(y = upper), linetype = 2, color = "blue") +
+  geom_hline(yintercept = 0, linetype = 3, color = "red") +
+  theme_minimal()
+
+
+```
+
+
+The figure shows the estimated coefficient function for the cannabis use effect in the FoSR model, with 95% pointwise confidence intervals shown as dashed blue lines. The solid black curve represents how the effect of cannabis use on the pupil light response varies over time. Where the confidence bands do not include zero, the effect is statistically significant at that time point.
+
+The effect is not constant over the functional domain. Instead, it grows rapidly following the light stimulus, peaks around 2–3 seconds, and then gradually declines while remaining positive. This pattern indicates that the largest group differences occur during the period of maximal constriction and early recovery, with smaller—but still meaningful—differences later in the response trajectory. The fact that the curve clearly departs from zero and exhibits substantial curvature reinforces the earlier conclusion that the effect is both statistically significant and nonlinear: cannabis use is associated with systematic, time-varying differences in the pupil light reflex rather than a simple uniform shift across the entire curve.
+
+## Curve Registration
+
+
+Curve registration is useful when much of the variability across subjects is driven by differences in timing, rather than only differences in amplitude or overall shape. In the pupil light response data, individuals may reach their point of maximal constriction at slightly different times, even if their trajectories are otherwise similar. If our goal is to compare features of the curves such as depth of constriction or speed of recovery it may be advantageous to first align the curves in time so that comparable physiological events occur at the same registered time.  
+
+That said, registration tends to play a more critical role in applications where timing variability is more pronounced. For example, in wearable device data collected over a 24-hour period, large temporal shifts in activity patterns may arise due to circadian rhythms, sleep timing, or behavioral scheduling, making time warping essential for meaningful comparison. In contrast, the variation in timing in this pupil dataset is more modest. Here, we primarily use curve registration to illustrate how the method works, rather than because it is strictly necessary for valid inference.
+
+
+### Modeling
+
+Below we implement curve registration for this data using `registr::registr_fpca`.
+
+```{r, warning = FALSE, message = FALSE}
+# reload pupil data
+pupil = readRDS(here::here("data", "pupil.rds"))
+
+Y_pupil <- pupil %>%
+  select(id,
+         index = seconds,          # time variable
+         value = percent_change) %>%   # functional outcome
+  filter(!is.na(value))
+
+pupil_reg <- register_fpca(
+  Y            = Y_pupil,
+  family       = "gaussian",
+  Kt           = 8,
+  Kh           = 4,
+  npc          = 2,
+  max_iterations = 10
+)
+```
+
+Results from registration are plotted below.
+
+```{r registration_plot, fig.width = 12, fig.height = 4}
+## Extract with original + registered time
+pupil_Y <- pupil_reg$Y %>%
+  mutate(
+    time_unreg = index,
+    time_reg   = t_hat
+  )
+
+## 1. Unregistered curves
+p_unreg <- ggplot() +
+  geom_line(data = pupil_Y,
+            aes(x = time_unreg, y = value, group = id),alpha = 0.2) +
+  labs(x = "Seconds since light stimulus",
+       y = "Percent change in pupil diameter",
+       title = "Unregistered curves") +
+  theme_minimal()
+
+## 2. Warping functions
+p_warp <- ggplot() +
+  geom_line(data = pupil_Y,
+            aes(x = time_unreg, y = time_reg, group = id), alpha = 0.2) +
+  geom_abline(intercept = 0, slope = 1, linetype = 2, color = "red") +
+  labs(x = "Original time",
+       y = "Registered time",
+       title = "Warping functions") +
+  theme_minimal()
+
+## 3. Registered curves
+p_reg <- ggplot() +
+  geom_line(data = pupil_Y,
+            aes(x = time_reg, y = value, group = id), alpha = 0.2) +
+  labs(x = "Registered time",
+       y = "Percent change in pupil diameter",
+       title = "Registered curves") +
+  theme_minimal()
+
+## Combine
+p_unreg + p_warp + p_reg
+```
+
+The left panel shows the original, unregistered curves. There is some variability in the timing of the minimum pupil diameter, and some curves begin recovering earlier than others. The middle panel shows the estimated warping functions, which map original time to registered time. The dashed red line represents "no warping"; curves that deviate from this line indicate subjects whose trajectories needed to be stretched or compressed in time to align key features with the group. Finally, the right panel shows the registered curves, after applying these subject-specific time transformations. We see that the point of maximal constriction is now better aligned across individuals, reducing timing-driven variability and isolating differences in curve shape.
+
+Registration can therefore be a powerful preprocessing step before FPCA or functional regression models when phase variation (timing differences) is present and scientifically meaningful to separate from amplitude variation.
+
+
+
+## Resources
+
+- [FDA with R book](https://www.amazon.com/Functional-Analysis-Monographs-Statistics-Probability/dp/1032244712/ref=sr_1_6?crid=UEKJYVS8EV6R&keywords=crainiceanu&qid=1698108861&sprefix=crainiceanu%2Caps%2C83&sr=8-6)
+- [Functional data analysis with pupillometer data](https://karger.com/dib/article/8/1/83/906653)
+- [FPCA](https://pmc.ncbi.nlm.nih.gov/articles/PMC4758990/)
+- [SoFR](https://pmc.ncbi.nlm.nih.gov/articles/PMC3285536/)
+- [Registration for exponential family functional data](https://pubmed.ncbi.nlm.nih.gov/30129091/)
+- [Registration for categorizing circadian chronotypes](https://www.tandfonline.com/doi/abs/10.1080/09291016.2021.1929673)
+
+
+
+
